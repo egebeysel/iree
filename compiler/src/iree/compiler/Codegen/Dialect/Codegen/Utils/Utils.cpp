@@ -216,6 +216,10 @@ DictionaryAttr serializeEncodingInfo(MLIRContext *ctx,
     items.emplace_back(b.getStringAttr("swizzle"),
                        serializeTileSwizzle(ctx, info.swizzle.value()));
   }
+  if (info.scalableTiles.has_value()) {
+    items.emplace_back(b.getStringAttr("scalableTiles"),
+                       b.getBoolArrayAttr(info.scalableTiles.value()));
+  }
 
   return b.getDictionaryAttr(items);
 }
@@ -248,6 +252,16 @@ deserializeEncodingInfo(DictionaryAttr attr) {
     if (!info.swizzle) {
       return std::nullopt;
     }
+  }
+  if (attr.contains("scalableTiles")) {
+    auto value = attr.getNamed("scalableTiles");
+    if (!value || !isa<ArrayAttr>(value->getValue()))
+      return std::nullopt;
+    SmallVector<bool> res = llvm::to_vector(
+        llvm::map_range(cast<ArrayAttr>(value->getValue()), [](Attribute a) {
+          return cast<BoolAttr>(a).getValue();
+        }));
+    info.scalableTiles = std::move(res);
   }
 
   return info;

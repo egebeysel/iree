@@ -200,6 +200,7 @@ inline LogicalResult setOpConfigAndEntryPointFnTranslation(
     ArrayRef<int64_t> workgroupSize = {},
     std::optional<int64_t> subgroupSize = {},
     DictionaryAttr pipelineConfig = DictionaryAttr()) {
+  // TODO(ege,sve): actually propagate scalable tile size info here.
   return setOpConfigAndEntryPointFnTranslation(entryPointFn, op, tileSizes, {},
                                                passPipeline, workgroupSize,
                                                subgroupSize, pipelineConfig);

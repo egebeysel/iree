@@ -74,9 +74,32 @@ public:
           if (IREE::Codegen::isIdentityLayout(encodingInfo)) {
             return type.dropEncoding();
           }
+          // TODO(ege,sve): Handle shape conversion in case of scalable tiles
+          // here. Btw. the values calculated here are cached in the type
+          // converter. So if the type looks the same, i.e. does not contain any
+          // information of scalable tiles, then one _might_ hit an issue. That
+          // being said, if we have SVE enabled with 2 different matmuls of the
+          // same shape, I also don't see a reason why we would have two
+          // different shapes inferred here. On the other hand, if we have some
+          // sort of heterogeneous stuff with SME and SVE where some  matmuls
+          // for some reason are offloaded to SVE, or if we have SVE and some of
+          // them are just vectorized with NEON, then this might be an issue.
+          // In the existence of scalable tiles, we mark the innerTileSizes for
+          // those dimensions as dynamic, so that the type inference can emit
+          // the correct type.
+          SmallVector<int64_t> innerTileSizesVector =
+              llvm::to_vector(encodingInfo.innerTileSizes);
+          if (encodingInfo.scalableTiles.has_value()) {
+            for (auto [index, value] :
+                 llvm::enumerate(encodingInfo.scalableTiles.value())) {
+              if (value) {
+                innerTileSizesVector[index] = ShapedType::kDynamic;
+              }
+            }
+          }
           auto packedType =
               cast<RankedTensorType>(linalg::PackOp::inferPackedType(
-                  type, encodingInfo.innerTileSizes, encodingInfo.innerDimsPos,
+                  type, innerTileSizesVector, encodingInfo.innerDimsPos,
                   encodingInfo.outerDimsPerm));
 
           // There is no swizzle, we are already done. Typically the case on

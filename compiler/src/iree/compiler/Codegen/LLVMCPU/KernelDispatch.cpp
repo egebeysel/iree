@@ -679,6 +679,13 @@ static void limitVectorTileSizes(SmallVectorImpl<int64_t> &vecTileSizes,
                                  TypeRange operandTypes,
                                  ArrayRef<AffineMap> indexingMaps,
                                  ArrayRef<int64_t> bounds = {}) {
+  // Early return if we have scalable tiles. AFAICS, limiting the vector tile
+  // sizes in the existence of a scalable, or in general a dynamic tile size
+  // would not make sense.
+  if (llvm::any_of(vecTileSizes, [](int64_t tileSize) {
+        return ShapedType::isDynamic(tileSize);
+      }))
+    return;
 
   int64_t numLoops = vecTileSizes.size();
   int numOperands = operandTypes.size();
@@ -734,6 +741,8 @@ static void limitVectorTileSizes(SmallVectorImpl<int64_t> &vecTileSizes,
       int64_t oldVal = vecTileSizes[loopNum];
       int64_t maxVal = std::max(minVecTileSizes[loopNum],
                                 eachOperandMaxTileBits / tileBits[i]);
+      // TODO(ege,sve): adjust this mechanism to account for dynamic inner tile
+      // sizes.
       int64_t adjustedVal = std::min(oldVal, maxVal);
       // If we are adjusting a tile size, make sure that the adjusted tile size
       // is a power-of-two, as introducing non-power-of-two tile sizes can be a

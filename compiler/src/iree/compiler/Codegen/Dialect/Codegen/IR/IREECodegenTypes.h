@@ -93,6 +93,8 @@ struct MaterializeEncodingInfo {
 
   // The optional swizzle, see the comment on TileSwizzle. Only used on GPU.
   std::optional<TileSwizzle> swizzle;
+  // The optional scalable tiles array
+  std::optional<SmallVector<bool>> scalableTiles;
 };
 
 } // namespace mlir::iree_compiler::IREE::Codegen

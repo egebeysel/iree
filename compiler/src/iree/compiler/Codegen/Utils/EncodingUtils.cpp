@@ -11,7 +11,9 @@
 #include "iree/compiler/Codegen/Dialect/Codegen/Utils/Utils.h"
 #include "iree/compiler/Codegen/Utils/Utils.h"
 #include "iree/compiler/Dialect/Encoding/Utils/Utils.h"
+#include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Utils/IndexingUtils.h"
+#include "mlir/Dialect/Vector/IR/VectorOps.h"
 
 namespace mlir::iree_compiler {
 
@@ -53,12 +55,41 @@ FailureOr<SmallVector<OpFoldResult>> getInnerTileSizesOfrImpl(
     const IREE::Codegen::MaterializeEncodingInfo &materializeEncodingInfo) {
   ArrayRef<int64_t> staticTileSizes = materializeEncodingInfo.innerTileSizes;
   if (!ShapedType::isDynamicShape(staticTileSizes)) {
-    return getAsOpFoldResult(rewriter.getI64ArrayAttr(staticTileSizes));
+    if (!materializeEncodingInfo.scalableTiles.has_value() ||
+        llvm::none_of(materializeEncodingInfo.scalableTiles.value(),
+                      [](bool scalable) { return scalable; }))
+      return getAsOpFoldResult(rewriter.getI64ArrayAttr(staticTileSizes));
+    // In this case, we have scalable tiles present and we have to generate the
+    // necessary vscale operation and the corresponding static_size * vscale
+    // values.
+    SmallVector<OpFoldResult> result(staticTileSizes.size());
+    auto vscale = rewriter.create<vector::VectorScaleOp>(loc);
+    for (size_t i = 0; i < result.size(); i++) {
+      if (materializeEncodingInfo.scalableTiles.value()[i]) {
+        // auto staticTileSizeAttr = rewriter.getIndexAttr(staticTileSizes[i]);
+        auto staticTileSize =
+            rewriter.create<arith::ConstantIndexOp>(loc, staticTileSizes[i]);
+        auto scalableInnerTileSize =
+            rewriter.create<arith::MulIOp>(loc, staticTileSize, vscale);
+        result[i] = scalableInnerTileSize.getResult();
+      } else {
+        result[i] = rewriter.getI64IntegerAttr(staticTileSizes[i]);
+      }
+    }
+    return result;
   }
 
   // Only VMVX with ukernel config supports dynamic inner tile sizes.
-  auto vmvxLayoutAttr =
-      dyn_cast<IREE::CPU::VMVXEncodingResolverAttr>(layoutAttr);
+  // TODO(ege,sve): I guess this isn't entirely true for SVE, but on the other
+  // hand, we don't really have "dynamic" inner tile sizes, but rather vscale *
+  // static. Also, I don't think the below target-dependent logic belongs here.
+  // That's also something to be considered. Maybe we could put dynamic tile
+  // size generation, or rather anything but tile size enumeration/choice into
+  // interfaces that backends could implement. Swizzle is a good example for
+  // this as well, I don't think it belongs to the common materialize encoding
+  // info struct, neither does the scalable tiles info. If we have more cases
+  // like these, the "common" logic becomes less and less "common".
+  auto vmvxLayoutAttr = dyn_cast<IREE::CPU::VMVXEncodingLayoutAttr>(layoutAttr);
   if (!vmvxLayoutAttr || !hasUkernel(vmvxLayoutAttr.getConfiguration())) {
     return failure();
   }

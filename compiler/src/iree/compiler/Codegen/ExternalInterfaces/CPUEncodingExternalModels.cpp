@@ -410,8 +410,14 @@ enumerateMatmulTileRiscv64(TypeRange elementTypes, DictionaryAttr config) {
 static SmallVector<TileMxNxK> enumerateMatmulTileArm64(TypeRange elementTypes,
                                                        DictionaryAttr config) {
   // Data-tiling for SVE is not implemented yet.
+  // TODO(ege,sve): proper sizes here
   if (hasFeature(config, "+sve") || hasFeature(config, "+sve2")) {
-    return {};
+    return {
+        TileMxNxK{8, 8, 1}, // Aim to use FMLA or FMLAL.
+        TileMxNxK{4, 8, 1}, // Truncation of the above.
+        TileMxNxK{2, 8, 1}, // Truncation of the above.
+        TileMxNxK{1, 8, 1}, // Truncation of the above.
+    };
   }
   assert(elementTypes.size() == 3);
   Type lhs = elementTypes[0];
@@ -670,6 +676,44 @@ struct CPUEncodingPackedLayoutMaterializerAttr
     if (IREE::Encoding::isNarrowNResult(encoding)) {
       transposeInPlace(info);
     }
+    // TODO(ege,sve): Support scalable vector sizes over here as well. One thing
+    // to note here is that the enumerate and choose tile sizes functions can be
+    // aware of the existence of SVE/SME, but they are not going to be able to
+    // propagate the information that they actually chose SVE/SME with the
+    // current setup of things. So if we want to have a fallback to NEON option
+    // or something in that regard, we have to consider something else. E.g. if
+    // we have the SME -> SVE -> NEON as our options and if SVE or NEON might be
+    // chosen over SME or SVE for some reason - benefitability or whatever -
+    // then just simply using the current setup of "enumerate possible tile
+    // sizes -> choose the most beneficial amongst them -> set encoding info
+    // accordingly" might not work. But if we're certain that one actually does
+    // choose the first available option with the highest priority, then this
+    // isn't a problem. Something to consider.
+    // Just return the N dimension as scalable for now for a first prototype of
+    // the SVE case. Currently, I hard-coded the N dim to be scalable, so that I
+    // could just test it. Obviously, one needs a proper mechanism here for
+    // SME/SVE. This might also be subject to innerDimsPos mapping, gotta check!
+    // This should go to a helper function, something like
+    // getScalableTilesForMatmul(encoding, layoutAttr.getConfiguration());
+    std::optional<unsigned> mDim =
+        cDims->m.empty() ? std::nullopt
+                         : encoding.mapDimToOperandIndex(cDims->m[0]);
+    std::optional<unsigned> nDim =
+        cDims->n.empty() ? std::nullopt
+                         : encoding.mapDimToOperandIndex(cDims->n[0]);
+    std::optional<unsigned> kDim = encoding.mapDimToOperandIndex(cDims->k[0]);
+    SmallVector<bool> scalableTiles;
+    if (mDim.has_value()) {
+      scalableTiles.push_back(false);
+    }
+    if (nDim.has_value()) {
+      scalableTiles.push_back(true);
+    }
+    if (kDim.has_value()) {
+      scalableTiles.push_back(false);
+    }
+    if (/* hasScalableSupport */ true)
+      info.scalableTiles = std::move(scalableTiles);
     return info;
   }
 };
@@ -747,6 +791,9 @@ enumerateVMVXMatmulTiles(linalg::ContractionDimensions cDims,
     hasUkernelSupport = false;
   }
   if (hasUkernelSupport) {
+    // TODO(ege,sve): VMVX with dynamic tile shapes are represented like this.
+    // For SVE, we probably don't want the same representation but rather the
+    // static_size * vscale kind of representation.
     // VMVX+ukernel uses dynamic tile shapes.
     return {TileMxNxK{ShapedType::kDynamic, ShapedType::kDynamic,
                       ShapedType::kDynamic}};
