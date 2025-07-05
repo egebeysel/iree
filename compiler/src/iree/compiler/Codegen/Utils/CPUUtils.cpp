@@ -7,13 +7,19 @@
 #include "iree/compiler/Codegen/Utils/CPUUtils.h"
 #include "iree/compiler/Codegen/Dialect/Codegen/IR/IREECodegenAttrs.h"
 
+#include <deque>
 #include <numeric>
+#include <queue>
 
 #include "llvm/ADT/STLExtras.h"
+#include "llvm/ADT/SmallVectorExtras.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/Debug.h"
+#include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
+#include "mlir/Dialect/Vector/IR/VectorOps.h"
+#include "mlir/IR/OpDefinition.h"
 
 #define DEBUG_TYPE "iree-codegen-cpu-utils"
 #define DBGS() (llvm::dbgs() << "[" DEBUG_TYPE "]: ")
@@ -86,6 +92,41 @@ std::string getEnableLoopPeelingStr() { return kLoopPeelingAttrName; }
 bool isOptEnabled(FunctionOpInterface funcOp, StringRef label) {
   DictionaryAttr config = getTranslationInfo(funcOp).getConfiguration();
   return config && config.contains(label);
+}
+
+bool isValueProducedByVscale(Operation *op) {
+  std::queue<Operation *> worklist;
+  worklist.push(op);
+  while (!worklist.empty()) {
+    auto currentOp = worklist.front();
+    worklist.pop();
+    if (llvm::isa<vector::VectorScaleOp>(currentOp))
+      return true;
+    if (currentOp->hasTrait<OpTrait::ConstantLike>())
+      continue;
+    for (auto operand : currentOp->getOperands())
+      worklist.push(operand.getDefiningOp());
+  }
+  return false;
+}
+
+FailureOr<int64_t> getStaticPartOfScalableTileSize(Operation *op) {
+  auto mulIOp = dyn_cast<arith::MulIOp>(op);
+  if (!mulIOp)
+    return failure();
+
+  auto lhs = mulIOp.getLhs().getDefiningOp();
+  auto rhs = mulIOp.getRhs().getDefiningOp();
+
+  auto cstOp = isa<arith::ConstantOp>(lhs) ? cast<arith::ConstantOp>(lhs)
+                                           : dyn_cast<arith::ConstantOp>(rhs);
+  if (!cstOp)
+    return failure();
+  if (!isa<vector::VectorScaleOp>(lhs) && !isa<vector::VectorScaleOp>(rhs))
+    return failure();
+  if (auto integerAttr = dyn_cast<IntegerAttr>(cstOp.getValue()))
+    return integerAttr.getInt();
+  return failure();
 }
 
 bool isScalableVectorizationEnabled() { return clEnableScalableVectorization; }
