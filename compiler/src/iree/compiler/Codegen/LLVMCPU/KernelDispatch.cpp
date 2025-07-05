@@ -1636,7 +1636,10 @@ setRootConfig(mlir::FunctionOpInterface entryPointFn,
                              scalableTileFlags, vectorSize, vecPreProcStrategy);
 }
 
-static TileSizesListType getMmt4dTileSizes(linalg::LinalgOp op) {
+static TileSizesListType
+getMmt4dTileSizes(linalg::LinalgOp op,
+                  IREE::HAL::ExecutableTargetAttr targetAttr,
+                  ScalableTileFlagsListType &scalableTileFlags) {
   DistributionHeuristicConfig distConfig;
   distConfig.allowIncompleteTile = true;
   distConfig.minTileSizes.resize(op.getNumLoops(), 0);
@@ -1703,7 +1706,22 @@ static TileSizesListType getMmt4dTileSizes(linalg::LinalgOp op) {
   vecTileSizes[mmt4dDimBase + 3] = M0;
   vecTileSizes[mmt4dDimBase + 4] = N0;
   vecTileSizes[mmt4dDimBase + 5] = K0;
-  limitVectorTileSizes(op, vecTileSizes);
+  // TODO(ege,sve,sme): For SME one has to mark those dimensions scalable as
+  // well.
+  if (isAArch64(targetAttr) && clEnableScalableVectorization &&
+      hasAnySVEFeature(targetAttr) && ShapedType::isDynamic(N0)) {
+    // Essentially, we have to come up with a reasonable heuristic over here,
+    // since the actual value that would make sense is unknown at compile-time.
+    vecTileSizes[mmt4dDimBase + 4] = 8;
+    scalableTileFlags.emplace_back(mmt4dDimBase + 6, false);
+    SmallVector<bool> vecScalableFlags(mmt4dDimBase + 6, false);
+    // Set the N0 dimension as scalable.
+    vecScalableFlags[mmt4dDimBase + 4] = true;
+    scalableTileFlags.push_back(vecScalableFlags);
+    scalableTileFlags.emplace_back(mmt4dDimBase + 6, false);
+  } else {
+    limitVectorTileSizes(op, vecTileSizes);
+  }
   SmallVector<int64_t> parallelTileSizes = vecTileSizes;
   SmallVector<int64_t> reductionTileSizes;
   splitParallelAndReductionTiles(op, parallelTileSizes, reductionTileSizes);
@@ -1716,8 +1734,13 @@ static TileSizesListType getMmt4dTileSizes(linalg::LinalgOp op) {
 static LogicalResult setRootConfig(mlir::FunctionOpInterface entryPointFn,
                                    linalg::Mmt4DOp Mmt4dOp) {
   assert(!getLoweringConfig(Mmt4dOp) && "expected lowering_config is not set");
+  // TODO(ege,sve): implement this below function to get scalable tile flags.
+  // auto scalableFlags = getMmt4dScalableFlags(Mmt4dOp);
+  IREE::HAL::ExecutableTargetAttr targetAttr = IREE::HAL::ExecutableTargetAttr::lookup(entryPointFn);
+  ScalableTileFlagsListType scalableFlags;
+  auto tileSizes = getMmt4dTileSizes(Mmt4dOp, targetAttr, scalableFlags);
   return setOpConfigAndEntryPointFnTranslation(
-      entryPointFn, Mmt4dOp, getMmt4dTileSizes(Mmt4dOp),
+      entryPointFn, Mmt4dOp, tileSizes, scalableFlags,
       DispatchLoweringPassPipeline::Mmt4dTilingExpert);
 }
 
@@ -1727,8 +1750,11 @@ static LogicalResult setRootConfig(mlir::FunctionOpInterface entryPointFn,
                                    linalg::BatchMmt4DOp batchMmt4dOp) {
   assert(!getLoweringConfig(batchMmt4dOp) &&
          "expected lowering_config is not set");
+  IREE::HAL::ExecutableTargetAttr targetAttr = IREE::HAL::ExecutableTargetAttr::lookup(entryPointFn);
+  ScalableTileFlagsListType scalableFlags;
+  auto tileSizes = getMmt4dTileSizes(batchMmt4dOp, targetAttr, scalableFlags);
   return setOpConfigAndEntryPointFnTranslation(
-      entryPointFn, batchMmt4dOp, getMmt4dTileSizes(batchMmt4dOp),
+      entryPointFn, batchMmt4dOp, tileSizes, scalableFlags,
       DispatchLoweringPassPipeline::Mmt4dTilingExpert);
 }
 
