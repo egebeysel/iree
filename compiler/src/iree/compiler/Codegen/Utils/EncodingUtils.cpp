@@ -89,7 +89,7 @@ FailureOr<SmallVector<OpFoldResult>> getInnerTileSizesOfrImpl(
   // this as well, I don't think it belongs to the common materialize encoding
   // info struct, neither does the scalable tiles info. If we have more cases
   // like these, the "common" logic becomes less and less "common".
-  auto vmvxLayoutAttr = dyn_cast<IREE::CPU::VMVXEncodingLayoutAttr>(layoutAttr);
+  auto vmvxLayoutAttr = dyn_cast<IREE::CPU::VMVXEncodingResolverAttr>(layoutAttr);
   if (!vmvxLayoutAttr || !hasUkernel(vmvxLayoutAttr.getConfiguration())) {
     return failure();
   }

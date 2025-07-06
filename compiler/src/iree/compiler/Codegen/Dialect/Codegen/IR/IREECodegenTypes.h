@@ -82,6 +82,7 @@ struct TileSwizzle {
   llvm::SmallVector<int64_t> permutation;
 };
 
+using ScalableTileFlags = SmallVector<bool>;
 /// Container of information needed to materialize the layout transformations.
 struct MaterializeEncodingInfo {
   // The next 3 fields are used to create a `linalg.pack` or `linalg.unpack` op,
@@ -94,7 +95,7 @@ struct MaterializeEncodingInfo {
   // The optional swizzle, see the comment on TileSwizzle. Only used on GPU.
   std::optional<TileSwizzle> swizzle;
   // The optional scalable tiles array
-  std::optional<SmallVector<bool>> scalableTiles;
+  std::optional<ScalableTileFlags> scalableTiles;
 };
 
 } // namespace mlir::iree_compiler::IREE::Codegen

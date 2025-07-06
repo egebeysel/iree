@@ -62,6 +62,58 @@ namespace {
 // Utilities.
 //===----------------------------------------------------------------------===//
 
+static FailureOr<IREE::Codegen::ScalableTileFlags>
+getScalableTileFlags(linalg::ContractionDimensions cDims,
+                     IREE::Encoding::EncodingAttr encoding,
+                     DictionaryAttr config) {
+  // TODO(ege,sve): Support scalable vector sizes over here as well. One thing
+  // to note here is that the enumerate and choose tile sizes functions can be
+  // aware of the existence of SVE/SME, but they are not going to be able to
+  // propagate the information that they actually chose SVE/SME with the
+  // current setup of things. So if we want to have a fallback to NEON option
+  // or something in that regard, we have to consider something else. E.g. if
+  // we have the SME -> SVE -> NEON as our options and if SVE or NEON might be
+  // chosen over SME or SVE for some reason - benefitability or whatever -
+  // then just simply using the current setup of "enumerate possible tile
+  // sizes -> choose the most beneficial amongst them -> set encoding info
+  // accordingly" might not work. But if we're certain that one actually does
+  // choose the first available option with the highest priority, then this
+  // isn't a problem. Something to consider.
+  // Just return the N dimension as scalable for now for a first prototype of
+  // the SVE case. Currently, I hard-coded the N dim to be scalable, so that I
+  // could just test it. Obviously, one needs a proper mechanism here for
+  // SME/SVE. This might also be subject to innerDimsPos mapping, gotta check!
+  // This should go to a helper function, something like
+  // getScalableTilesForMatmul(encoding, layoutAttr.getConfiguration());
+  if (!isAArch64(config))
+    return failure();
+  std::optional<unsigned> mDim =
+      cDims.m.empty() ? std::nullopt
+                      : encoding.mapDimToOperandIndex(cDims.m[0]);
+  std::optional<unsigned> nDim =
+      cDims.n.empty() ? std::nullopt
+                      : encoding.mapDimToOperandIndex(cDims.n[0]);
+  std::optional<unsigned> kDim = encoding.mapDimToOperandIndex(cDims.k[0]);
+  SmallVector<bool> scalableTiles;
+  // TODO(ege,sve): clEnableScalarVectorization flag resides in Tiling code.
+  // Maybe there should be some sort of control mechanism over here or at
+  // encoding materialization/specialization as well. Also choosing between SME
+  // & SVE should also probably reside around here.
+  if (mDim.has_value()) {
+    scalableTiles.push_back(/* dtWithSME */ false &&
+                            hasFeature(config, "+sme"));
+  }
+  if (nDim.has_value()) {
+    scalableTiles.push_back(
+        /* dtWithSVE */ true &&
+        (hasFeature(config, "+sve") || hasFeature(config, "+sve2")));
+  }
+  if (kDim.has_value()) {
+    scalableTiles.push_back(false);
+  }
+  return scalableTiles;
+}
+
 static void transposeInPlace(MaterializeEncodingInfo &info) {
   // Vector cases: nothing to do.
   if (info.innerTileSizes.size() < 2) {
@@ -676,44 +728,11 @@ struct CPUEncodingPackedLayoutMaterializerAttr
     if (IREE::Encoding::isNarrowNResult(encoding)) {
       transposeInPlace(info);
     }
-    // TODO(ege,sve): Support scalable vector sizes over here as well. One thing
-    // to note here is that the enumerate and choose tile sizes functions can be
-    // aware of the existence of SVE/SME, but they are not going to be able to
-    // propagate the information that they actually chose SVE/SME with the
-    // current setup of things. So if we want to have a fallback to NEON option
-    // or something in that regard, we have to consider something else. E.g. if
-    // we have the SME -> SVE -> NEON as our options and if SVE or NEON might be
-    // chosen over SME or SVE for some reason - benefitability or whatever -
-    // then just simply using the current setup of "enumerate possible tile
-    // sizes -> choose the most beneficial amongst them -> set encoding info
-    // accordingly" might not work. But if we're certain that one actually does
-    // choose the first available option with the highest priority, then this
-    // isn't a problem. Something to consider.
-    // Just return the N dimension as scalable for now for a first prototype of
-    // the SVE case. Currently, I hard-coded the N dim to be scalable, so that I
-    // could just test it. Obviously, one needs a proper mechanism here for
-    // SME/SVE. This might also be subject to innerDimsPos mapping, gotta check!
-    // This should go to a helper function, something like
-    // getScalableTilesForMatmul(encoding, layoutAttr.getConfiguration());
-    std::optional<unsigned> mDim =
-        cDims->m.empty() ? std::nullopt
-                         : encoding.mapDimToOperandIndex(cDims->m[0]);
-    std::optional<unsigned> nDim =
-        cDims->n.empty() ? std::nullopt
-                         : encoding.mapDimToOperandIndex(cDims->n[0]);
-    std::optional<unsigned> kDim = encoding.mapDimToOperandIndex(cDims->k[0]);
-    SmallVector<bool> scalableTiles;
-    if (mDim.has_value()) {
-      scalableTiles.push_back(false);
+    FailureOr<IREE::Codegen::ScalableTileFlags> scalableFlags =
+        getScalableTileFlags(*cDims, encoding, layoutAttr.getConfiguration());
+    if (succeeded(scalableFlags)) {
+      info.scalableTiles = std::move(scalableFlags);
     }
-    if (nDim.has_value()) {
-      scalableTiles.push_back(true);
-    }
-    if (kDim.has_value()) {
-      scalableTiles.push_back(false);
-    }
-    if (/* hasScalableSupport */ true)
-      info.scalableTiles = std::move(scalableTiles);
     return info;
   }
 };

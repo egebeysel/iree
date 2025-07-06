@@ -531,8 +531,16 @@ void addMmt4dTilingExpertPassPipeline(OpPassManager &funcPassManager,
                                       LLVMCPUPipelineOptions &pipelineOpt) {
   addTileAndDistributePasses(funcPassManager);
 
-  funcPassManager.addPass(createLLVMCPUTileRootAndFuseProducerConsumer(
-      static_cast<int64_t>(tilingConfig.getVectorCommonParallelLevel())));
+  if (pipelineOpt.enableAArch64SVE) {
+    // TODO(ege,sve): one-shot loops with vscale ub's and steps should be cleaned up :)
+    funcPassManager.addPass(createLLVMCPUTileAndFusePass(
+        static_cast<int64_t>(tilingConfig.getVectorCommonParallelLevel())));
+  } else {
+    // TODO(ege,sve): teach the fresher tile root & fuse producer consumer pass
+    // about scalable tiles and get rid of the branching & option.
+    funcPassManager.addPass(createLLVMCPUTileRootAndFuseProducerConsumer(
+        static_cast<int64_t>(tilingConfig.getVectorCommonParallelLevel())));
+  }
   // The below two passes are nop if the "mmt4d" is explicitly excluded in the
   // ukernels attribute.
   funcPassManager.addPass(createCPUPrepareUkernelsPass());

@@ -77,6 +77,7 @@ struct LLVMCPUPipelineOptions {
   bool enablePeeling = false;
   bool enableVectorMasking = false;
   bool enableAArch64SME = false;
+  bool enableAArch64SVE = false;
   bool enableAArch64I8mm = false;
   bool lowerToAVX2 = false;
 };
