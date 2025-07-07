@@ -30,8 +30,10 @@ Value calculatePackedStorageSizeInBytesImpl(Attribute attr, Location loc,
   MaterializeEncodingInfo encodingInfo = deviceLayoutAttr.getEncodingInfo(type);
   SmallVector<int64_t> paddedShape(type.getShape());
   SmallVector<Value> paddedDynamicDims(dynamicDims.begin(), dynamicDims.end());
-  for (auto [dim, size] : llvm::zip_equal(encodingInfo.innerDimsPos,
-                                          encodingInfo.innerTileSizes)) {
+  SmallVector<Value> paddedScalableDims(encodingInfo.innerTileSizes.size());
+  const SmallVector<bool> scalableFlags = encodingInfo.scalableTiles.value_or(SmallVector<bool>(encodingInfo.innerTileSizes.size(), false));
+  for (auto [dim, size, scalableFlag] : llvm::zip_equal(encodingInfo.innerDimsPos,
+                                          encodingInfo.innerTileSizes, scalableFlags)) {
     // Only VMVX backend has dynamic inner tile sizes when ukernel is enabled.
     // It assumes that the padding size is 16. Ideally, the logic should be
     // moved to VMVX implementation details. However, we cook the logic here to
@@ -48,13 +50,15 @@ Value calculatePackedStorageSizeInBytesImpl(Attribute attr, Location loc,
       continue;
     }
 
-    if (type.isDynamicDim(dim)) {
+    if (type.isDynamicDim(dim) && !scalableFlag) {
       dim = type.getDynamicDimIndex(dim);
       auto alignment = builder.create<arith::ConstantIndexOp>(loc, size);
       paddedDynamicDims[dim] = builder.create<arith::CeilDivSIOp>(
           loc, paddedDynamicDims[dim], alignment);
       paddedDynamicDims[dim] =
           builder.create<arith::MulIOp>(loc, paddedDynamicDims[dim], alignment);
+    } else if (scalableFlag) {
+      auto vscale = builder.create<vector::Vscale>()
     } else {
       paddedShape[dim] = llvm::alignTo(paddedShape[dim], size);
     }
