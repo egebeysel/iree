@@ -701,6 +701,30 @@ getPackScalableTileFlags(mlir::FunctionOpInterface entryPointFn,
   return scalableTileFlags;
 }
 
+// This function takes the result of op.getMixedTiles() from a pack/unpack op
+// and returns the static tile sizes and scalable tile flags. For scalable inner
+// tiles, it returns the static counterpart and the corresponding flag. E.g. for
+// [8, [8]] it returns [8, 8] and [false, true].
+static FailureOr<SizesAndScalableFlags>
+getScalableTileSizesAndFlags(SmallVector<OpFoldResult> mixedInnerTiles) {
+  SmallVector<int64_t> tileSizes(mixedInnerTiles.size(), 0);
+  IREE::Codegen::ScalableTileFlags scalableFlags(mixedInnerTiles.size(), false);
+  for (unsigned pos = 0; pos < mixedInnerTiles.size(); ++pos) {
+    if (auto innerTileVal = dyn_cast<Value>(mixedInnerTiles[pos])) {
+      FailureOr<int64_t> innerTile =
+          getStaticPartOfScalableTileSize(innerTileVal.getDefiningOp());
+      if (failed(innerTile))
+        return failure();
+      tileSizes[pos] = innerTile.value();
+      scalableFlags[pos] = true;
+      continue;
+    }
+    auto innerTileAttr = cast<Attribute>(mixedInnerTiles[pos]);
+    tileSizes[pos] = cast<IntegerAttr>(innerTileAttr).getInt();
+  }
+  return SizesAndScalableFlags{tileSizes, scalableFlags};
+}
+
 static void limitVectorTileSizes(SmallVectorImpl<int64_t> &vecTileSizes,
                                  int64_t eachOperandMaxTileBits,
                                  int64_t allOperandsMaxTileBits,
@@ -2680,7 +2704,6 @@ static LogicalResult setRootConfig(mlir::FunctionOpInterface entryPointFn,
   assert(!getLoweringConfig(op) && "expected lowering_config is not set");
   SmallVector<int64_t> distTileSizes =
       getDefaultDistributedLevelTileSizes(op, DistributionHeuristicConfig{});
-
   // Add an extra level of tiling.
   // TODO: Limit vector tile sizes for other TilingInterface ops.
   SmallVector<int64_t> vecTileSizes = distTileSizes;
@@ -2751,18 +2774,21 @@ setRootConfigImpl(mlir::FunctionOpInterface entryPointFn, Operation *op,
 /// setLoweringConfigForComputeOps due to its affine map. At the same time,
 /// its producer will have the parallel tile sizes [1, 1, 16], which is how the
 /// pack op wants to tile-and-fuse it.
-static LogicalResult
-adjustTileSizesForPackOp(mlir::FunctionOpInterface entryPointFn,
-                         linalg::PackOp packOp,
-                         SmallVector<int64_t> &distTileSizes,
-                         SmallVector<int64_t> &parallelVecTileSizes) {
+static LogicalResult adjustTileSizesForPackOp(
+    mlir::FunctionOpInterface entryPointFn, linalg::PackOp packOp,
+    SmallVector<int64_t> &distTileSizes,
+    SmallVector<int64_t> &parallelVecTileSizes,
+    IREE::Codegen::ScalableTileFlags &vecScalableTileFlags) {
 
   ArrayRef<int64_t> innerDimsPos = packOp.getInnerDimsPos();
-  ArrayRef<int64_t> innerTiles = packOp.getStaticInnerTiles();
-  // Currently we only handle pack op with static inner tile sizes.
-  if (ShapedType::isDynamicShape(innerTiles)) {
+  // ArrayRef<int64_t> innerTiles = packOp.getStaticInnerTiles();
+  SmallVector<OpFoldResult> mixedInnerTiles = packOp.getMixedTiles();
+  // Currently we only handle pack op with static or scalable inner tile sizes.
+  FailureOr<SizesAndScalableFlags> tileSizesAndScalableFlags =
+      getScalableTileSizesAndFlags(mixedInnerTiles);
+  if (failed(tileSizesAndScalableFlags))
     return failure();
-  }
+  auto [innerTiles, scalableFlags] = *tileSizesAndScalableFlags;
   // Pack op requires special vector tile sizes to achieve good performance.
   // Override the parallel vector tile sizes from pack op.
   auto vecTileSizes = getPackVectorTileSizes(entryPointFn, packOp);
@@ -2772,8 +2798,10 @@ adjustTileSizesForPackOp(mlir::FunctionOpInterface entryPointFn,
     applyPermutationToVector(vecTileSizes, invertedPerm);
   }
   // Scale to actual tile sizes with the pack op's inner tile sizes.
-  for (auto [pos, size] : llvm::zip_equal(innerDimsPos, innerTiles)) {
+  for (auto [pos, size, scalableFlag] :
+       llvm::zip_equal(innerDimsPos, innerTiles, scalableFlags)) {
     vecTileSizes[pos] *= size;
+    vecScalableTileFlags[pos] = scalableFlag;
   }
   for (auto [pos, size] : llvm::enumerate(vecTileSizes)) {
     if (!size)
@@ -3131,7 +3159,8 @@ setLoweringConfigForComputeOps(mlir::FunctionOpInterface entryPointFn,
 
     if (auto packOp = dyn_cast<linalg::PackOp>(op)) {
       if (failed(adjustTileSizesForPackOp(entryPointFn, packOp, distTileSizes,
-                                          parallelVecTileSizes))) {
+                                          parallelVecTileSizes,
+                                          parallelVecScalableTileSizes))) {
         return failure();
       }
       hasSeenPackOp = true;
@@ -3236,11 +3265,16 @@ setLoweringConfigForComputeOps(mlir::FunctionOpInterface entryPointFn,
       bool setUpOK =
           TypeSwitch<Operation *, bool>(op)
               .Case<linalg::PackOp>([&](auto packOp) {
-                // TODO: Handle scalable flags
-                if (llvm::any_of(rootLoweringConfig.getVectorScalableFlags(),
-                                 [&](bool flag) { return flag; })) {
+                // Get the inner tile sizes and the corresponding scalable
+                // flags. Note, this assumes that dynamic inner tile sizes have
+                // to be scalable inner tiles. This currently holds for the
+                // LLVMCPU target, although if something else were to be added
+                // here, we have to make sure to wire the logic for that over
+                // here.
+                FailureOr<SizesAndScalableFlags> innerTilesAndScalableFlags =
+                    getScalableTileSizesAndFlags(packOp.getMixedTiles());
+                if (failed(innerTilesAndScalableFlags))
                   return false;
-                }
                 updateOrAddTilingLevelInfo(newTilingInfo,
                                            IREE::CPU::VectorReductionTiles,
                                            zeros, falseVec);
@@ -3248,19 +3282,28 @@ setLoweringConfigForComputeOps(mlir::FunctionOpInterface entryPointFn,
                                            IREE::CPU::VectorInnerParallelTiles,
                                            innerVecTileSizes, falseVec);
                 // Scale and permutate the outer dim tiles for pack op.
-                ArrayRef<int64_t> innerTiles = packOp.getStaticInnerTiles();
+                auto [innerTiles, scalableFlags] = *innerTilesAndScalableFlags;
                 ArrayRef<int64_t> dimPos = packOp.getInnerDimsPos();
                 auto outerDimsPerm = packOp.getOuterDimsPerm();
                 for (IREE::CPU::LoweringConfigLevelInfo &info : newTilingInfo) {
                   SmallVector<int64_t> &tileSizes = info.sizes;
-                  for (auto [pos, size] : llvm::zip_equal(dimPos, innerTiles)) {
-                    if (tileSizes[pos] == 0 || ShapedType::isDynamic(size))
+                  IREE::Codegen::ScalableTileFlags &newScalableFlags =
+                      info.scalableFlags;
+                  for (auto [pos, size, scalable] :
+                       llvm::zip_equal(dimPos, innerTiles, scalableFlags)) {
+                    if (tileSizes[pos] == 0)
                       continue;
                     tileSizes[pos] = tileSizes[pos] / size;
+                    if (info.level == IREE::CPU::VectorCommonParallelTiles &&
+                        scalable)
+                      // This practically divides the outer tile size by vscale.
+                      newScalableFlags[pos] = false;
                   }
                   if (!outerDimsPerm.empty()) {
                     tileSizes.resize(numLoops, 0);
+                    newScalableFlags.resize(numLoops, false);
                     applyPermutationToVector(tileSizes, outerDimsPerm);
+                    applyPermutationToVector(newScalableFlags, outerDimsPerm);
                   }
                 }
 
