@@ -6,9 +6,11 @@
 
 #include "iree/compiler/Codegen/Common/Passes.h"
 #include "iree/compiler/Codegen/Common/TileSizeSelection.h"
+#include "iree/compiler/Codegen/Dialect/Codegen/IR/IREECodegenAttrs.h"
 #include "iree/compiler/Codegen/Dialect/VectorExt/IR/VectorExtDialect.h"
 #include "iree/compiler/Codegen/Dialect/VectorExt/Transforms/Transforms.h"
 #include "iree/compiler/Codegen/Utils/Utils.h"
+#include "llvm/ADT/STLExtras.h"
 #include "llvm/Support/DebugLog.h"
 #include "mlir/Dialect/Affine/LoopUtils.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
@@ -17,6 +19,7 @@
 #include "mlir/Dialect/MemRef/Transforms/Passes.h"
 #include "mlir/Dialect/MemRef/Transforms/Transforms.h"
 #include "mlir/Dialect/SCF/Utils/Utils.h"
+#include "mlir/Dialect/Utils/IndexingUtils.h"
 #include "mlir/Dialect/Utils/StaticValueUtils.h"
 #include "mlir/Dialect/Vector/Transforms/LoweringPatterns.h"
 #include "mlir/Dialect/Vector/Transforms/VectorRewritePatterns.h"
@@ -32,6 +35,88 @@ namespace mlir::iree_compiler {
 #include "iree/compiler/Codegen/Common/Passes.h.inc"
 
 namespace {
+
+// Note: this is the modified version of hanhanW's awesome PR#21514.
+static std::optional<SizesAndScalableFlags>
+getVectorInputSizesFromDestTiles(linalg::UnPackOp op,
+                                 ArrayRef<int64_t> writeVectorSizes,
+                                 ArrayRef<bool> scalableFlags) {
+  assert(writeVectorSizes.size() == op.getDestRank());
+
+  ArrayRef<int64_t> innerDimPos = op.getInnerDimsPos();
+  SmallVector<OpFoldResult> innerTiles = op.getMixedTiles();
+  ArrayRef<int64_t> outerDimsPerm = op.getOuterDimsPerm();
+
+  // readVectorSizes is the size of tensor used to read and apply mask. It is
+  // set like this: Let's say the vectorSize (VS) array is size 'N' and
+  // the sourceShape(SS) is 'M' where M >= N and InnerTileSizes (IT) of
+  // size M-N
+  // Thus:
+  // - initially: readVectorSizes = vectorInputSizes
+  // - Divide all the readMaskShape locations pointed by innerDimPos
+  //   by the innerTileSize attribute value.
+  // - if outer_dims_perms is present: do that permutation on readVectorSizes.
+  // - Append the remaining shape from SS
+  // E.g. let's say let's say unpackTensorType.getShape() = <8x8x32x16>
+  // inner Dim Pos = [0, 1] and Inner Tiles = [32, 16], vector_sizes are [512,
+  // 128] and outer_dims_perm is [1, 0] then read shape is:
+  //   ReadVectorSizes(initial): [512, 128]
+  //   Final Value(after innerDim Adjustment): [512/32, 128/16]
+  //                                           = [16, 8]
+  //   After applying outer_dims_perm: [8, 16]
+  //   After appending the rest of the sourceShape: [8, 16, 32, 16]
+  SmallVector<int64_t> vectorSizes(writeVectorSizes);
+  SmallVector<bool> scalableFlagsVec(scalableFlags);
+  FailureOr<SizesAndScalableFlags> staticInnerTilesAndFlags =
+      getScalableTileSizesAndFlags(innerTiles);
+  if (failed(staticInnerTilesAndFlags)) {
+    LDBG() << "Static or scalable inner tile sizes cannot be inferred!";
+    return std::nullopt;
+  }
+  auto [staticInnerTileSizes, innerScalableFlags] =
+      staticInnerTilesAndFlags.value();
+  for (auto [index, size] : enumerate(staticInnerTileSizes)) {
+    if (innerScalableFlags[index]) {
+      // In the case of scalable inner tiles, we have to make sure that tile
+      // size is also scalable. If that is the case, we can infer the read size
+      // by just dividing the static sizes and flipping the scalable flag. For
+      // example, if we have [8, [14]] as tile sizes and [8, [8]] as the
+      // corresponding inner tile sizes, we can obtain
+      // [8/8 , divideCeil(14/8), 8, [8]] = [1, 2, 8, [8]].
+      //
+      // In the case of static tile sizes and scalable inner tile sizes, we
+      // cannot infer a static size for the outer dims.
+      //
+      // TODO(egebeysel): Technically speaking, in the existence of scalable
+      // inner tile sizes, we can infer a _safe_ upper bound on the outer dims
+      // and use these for vectorization, i.e. for [8, 14] and [8, [8]], we can
+      // conservatively assume that vscale = 1 and therefore set [1, 2, 8 [8]].
+      // Not sure how much sense this would make, but it should be semantically
+      // correct.
+      auto pos = innerDimPos[index];
+      if (!scalableFlagsVec[pos]) {
+        LDBG() << "Scalable inner tile sizes and static tile sizes are not "
+                  "supported!";
+        return std::nullopt;
+      }
+      scalableFlagsVec[pos] = false;
+    }
+    vectorSizes[innerDimPos[index]] =
+        llvm::divideCeil(vectorSizes[innerDimPos[index]], size);
+  }
+  if (!outerDimsPerm.empty()) {
+    applyPermutationToVector(vectorSizes, outerDimsPerm);
+    applyPermutationToVector(scalableFlagsVec, outerDimsPerm);
+  }
+  SizesAndScalableFlags result;
+  vectorSizes.append(staticInnerTileSizes.begin(), staticInnerTileSizes.end());
+  scalableFlagsVec.append(innerScalableFlags.begin(), innerScalableFlags.end());
+  result.first.assign(vectorSizes.begin(), vectorSizes.end());
+  result.second.assign(scalableFlagsVec.begin(), scalableFlagsVec.end());
+
+  return result;
+}
+
 // Returns the vector sizes from the local lowering config or try to infer them
 // from the tensor shapes and tiled loops in the IR.
 static std::optional<SizesAndScalableFlags>
@@ -42,6 +127,17 @@ getVectorSizes(Operation *op, bool useConfiguredVectorSizes) {
   if (useConfiguredVectorSizes && tilingConfig) {
     LDBG() << "Use configured vector sizes from lowering config";
     auto [vectorSizes, scalableFlags] = tilingConfig->getVectorTileSizes();
+    if (auto unpackOp = dyn_cast<linalg::UnPackOp>(op)) {
+      std::optional<SizesAndScalableFlags> maybeInputVectorSizes =
+          getVectorInputSizesFromDestTiles(unpackOp, vectorSizes,
+                                           scalableFlags);
+      if (maybeInputVectorSizes) {
+        std::tie(vectorSizes, scalableFlags) = maybeInputVectorSizes.value();
+      } else {
+        LDBG() << "Failed to get input vector sizes for unpack op";
+        return std::nullopt;
+      }
+    }
     // Replace zeros in canonical vector shape to turn it into a valid shape.
     std::replace(vectorSizes.begin(), vectorSizes.end(), 0, 1);
     return std::make_pair(vectorSizes, scalableFlags);

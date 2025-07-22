@@ -36,18 +36,6 @@ std::string getEnableLoopPeelingStr();
 /// part of to the translation info corresponding to this funciton.
 bool isOptEnabled(FunctionOpInterface funcOp, StringRef label);
 
-/// Returns if the given Value is stemming from a `vector.vscale` op. Usually,
-/// inner tile sizes of pack/unpack ops are a multiplication of a constant and
-/// a vscale op, but we check the entire sequence and return true if a vscale
-/// op is found.
-bool isValueProducedByVscale(Operation *op);
-
-/// This utility function returns the static part of scalable inner tile sizes.
-/// These are - as of now always and probably should always be - arith.muli ops
-/// with `vector.vscale` on one side and an `arith.constant` on the other. It
-/// returns the constant if found.
-FailureOr<int64_t> getStaticPartOfScalableTileSize(Operation *op);
-
 /// Returns if scalable vectorization is enabled or not.
 bool isScalableVectorizationEnabled();
 
