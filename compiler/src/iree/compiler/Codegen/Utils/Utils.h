@@ -7,6 +7,7 @@
 #ifndef IREE_COMPILER_CODEGEN_UTILS_UTILS_H_
 #define IREE_COMPILER_CODEGEN_UTILS_UTILS_H_
 
+#include "iree/compiler/Codegen/Dialect/Codegen/IR/IREECodegenAttrs.h"
 #include "iree/compiler/Dialect/HAL/IR/HALOps.h"
 #include "iree/compiler/Dialect/LinalgExt/IR/LinalgExtOps.h"
 #include "iree/compiler/Dialect/TensorExt/IR/TensorExtOps.h"
@@ -271,6 +272,25 @@ bool hasFusedLeadingOp(linalg::LinalgOp rootOp);
 
 std::optional<vector::VscaleRange>
 getDefaultVscaleRange(IREE::HAL::ExecutableTargetAttr targetAttr);
+
+// Returns if the given Value is stemming from a `vector.vscale` op. Usually,
+// inner tile sizes of pack/unpack ops are a multiplication of a constant and
+// a vscale op, but we check the entire sequence and return true if a vscale
+// op is found.
+bool isValueProducedByVscale(Operation *op);
+
+// This utility function returns the static part of scalable inner tile sizes.
+// These are - as of now always and probably should always be - arith.muli ops
+// with `vector.vscale` on one side and an `arith.constant` on the other. It
+// returns the constant if found.
+FailureOr<int64_t> getStaticPartOfScalableTileSize(Operation *op);
+
+// This function takes the result of op.getMixedTiles() from a pack/unpack op
+// and returns the static tile sizes and scalable tile flags. For scalable inner
+// tiles, it returns the static counterpart and the corresponding flag. E.g. for
+// [8, [8]] it returns [8, 8] and [false, true].
+FailureOr<SizesAndScalableFlags>
+getScalableTileSizesAndFlags(SmallVector<OpFoldResult> mixedInnerTiles);
 
 using DimBound = vector::ConstantOrScalableBound;
 using DimBoundSize = DimBound::BoundSize;
