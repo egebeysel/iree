@@ -4,11 +4,13 @@
 // See https://llvm.org/LICENSE.txt for license information.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
+#include <cstdint>
 #include "iree/compiler/Codegen/Common/Passes.h"
 #include "iree/compiler/Codegen/Common/TileSizeSelection.h"
 #include "iree/compiler/Codegen/Dialect/VectorExt/IR/VectorExtDialect.h"
 #include "iree/compiler/Codegen/Dialect/VectorExt/Transforms/Transforms.h"
 #include "iree/compiler/Codegen/Utils/Utils.h"
+#include "llvm/ADT/STLExtras.h"
 #include "mlir/Dialect/Affine/LoopUtils.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Linalg/Transforms/Hoisting.h"
@@ -16,6 +18,7 @@
 #include "mlir/Dialect/MemRef/Transforms/Passes.h"
 #include "mlir/Dialect/MemRef/Transforms/Transforms.h"
 #include "mlir/Dialect/SCF/Utils/Utils.h"
+#include "mlir/Dialect/Utils/IndexingUtils.h"
 #include "mlir/Dialect/Utils/StaticValueUtils.h"
 #include "mlir/Dialect/Vector/Transforms/LoweringPatterns.h"
 #include "mlir/Dialect/Vector/Transforms/VectorRewritePatterns.h"
@@ -43,6 +46,31 @@ getVectorSizes(Operation *op, bool useConfiguredVectorSizes) {
   if (useConfiguredVectorSizes && tilingConfig) {
     LDBG("Use configured vector sizes from lowering config");
     auto [vectorSizes, scalableFlags] = tilingConfig->getVectorTileSizes();
+    if (auto unpackOp = dyn_cast<linalg::UnPackOp>(op)) {
+      if (llvm::any_of(scalableFlags, [](bool scalable) { return scalable; })) {
+        // TODO(egebeysel): This is just hacking and assuming to try out. Fix
+        // this!
+        auto sourceVectorSizes = vectorSizes;
+        auto sourceScalableFlags = scalableFlags;
+        auto outerDimsPerm = unpackOp.getOuterDimsPerm();
+        if (!outerDimsPerm.empty()) {
+          auto invertedPerm = invertPermutationVector(outerDimsPerm);
+          applyPermutationToVector(sourceVectorSizes, invertedPerm);
+          applyPermutationToVector(sourceScalableFlags, invertedPerm);
+        }
+        auto innerTileSize = unpackOp.getStaticInnerTiles().size();
+        auto finalVectorSizes = SmallVector<int64_t>(innerTileSize, 1);
+        auto finalScalableFlags = SmallVector<bool>(innerTileSize, false);
+        finalVectorSizes.append(sourceVectorSizes.begin(),
+                                sourceVectorSizes.end());
+        finalVectorSizes.append(vectorSizes.begin(), vectorSizes.end());
+        finalScalableFlags.append(sourceScalableFlags.begin(),
+                                  sourceScalableFlags.end());
+        finalScalableFlags.append(scalableFlags.begin(), scalableFlags.end());
+        std::replace(finalVectorSizes.begin(), finalVectorSizes.end(), 0, 1);
+        return std::make_pair(finalVectorSizes, finalScalableFlags);
+      }
+    }
     // Replace zeros in canonical vector shape to turn it into a valid shape.
     std::replace(vectorSizes.begin(), vectorSizes.end(), 0, 1);
     return std::make_pair(vectorSizes, scalableFlags);

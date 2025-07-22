@@ -27,6 +27,9 @@ using TileSizesListTypeRef = ArrayRef<SmallVector<int64_t>>;
 /// Typedef for scalable tile flags at different levels of tiling.
 using ScalableTileFlagsListType = SmallVector<SmallVector<bool>>;
 using ScalableTileFlagsListTypeRef = ArrayRef<SmallVector<bool>>;
+/// Typedef for tile sizes and scalable flags.
+using SizesAndScalableFlags =
+    std::pair<SmallVector<int64_t>, SmallVector<bool>>;
 /// Flag to add attributes for tuner.
 inline llvm::cl::opt<bool>
     clSetTunerAttr("iree-config-add-tuner-attributes",

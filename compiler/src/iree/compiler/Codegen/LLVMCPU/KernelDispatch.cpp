@@ -702,30 +702,6 @@ getPackScalableTileFlags(mlir::FunctionOpInterface entryPointFn,
   return scalableTileFlags;
 }
 
-// This function takes the result of op.getMixedTiles() from a pack/unpack op
-// and returns the static tile sizes and scalable tile flags. For scalable inner
-// tiles, it returns the static counterpart and the corresponding flag. E.g. for
-// [8, [8]] it returns [8, 8] and [false, true].
-static FailureOr<SizesAndScalableFlags>
-getScalableTileSizesAndFlags(SmallVector<OpFoldResult> mixedInnerTiles) {
-  SmallVector<int64_t> tileSizes(mixedInnerTiles.size(), 0);
-  IREE::Codegen::ScalableTileFlags scalableFlags(mixedInnerTiles.size(), false);
-  for (unsigned pos = 0; pos < mixedInnerTiles.size(); ++pos) {
-    if (auto innerTileVal = dyn_cast<Value>(mixedInnerTiles[pos])) {
-      FailureOr<int64_t> innerTile =
-          getStaticPartOfScalableTileSize(innerTileVal.getDefiningOp());
-      if (failed(innerTile))
-        return failure();
-      tileSizes[pos] = innerTile.value();
-      scalableFlags[pos] = true;
-      continue;
-    }
-    auto innerTileAttr = cast<Attribute>(mixedInnerTiles[pos]);
-    tileSizes[pos] = cast<IntegerAttr>(innerTileAttr).getInt();
-  }
-  return SizesAndScalableFlags{tileSizes, scalableFlags};
-}
-
 static void limitVectorTileSizes(SmallVectorImpl<int64_t> &vecTileSizes,
                                  int64_t eachOperandMaxTileBits,
                                  int64_t allOperandsMaxTileBits,

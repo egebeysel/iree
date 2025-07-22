@@ -1695,7 +1695,7 @@ vectorizeStaticInnerTiledOp(RewriterBase &rewriter,
   for (auto [operand, type, padValue] :
        llvm::zip_equal(newOperands, argTypes, padValues)) {
     operand = vector::createReadOrMaskedRead(
-        rewriter, loc, operand, type.getShape(), padValue,
+        rewriter, loc, operand, type.getShape(), {}, padValue,
         /*useInBoundsInsteadOfMasking=*/true);
   }
   auto newTiledOp = rewriter.create<IREE::Codegen::InnerTiledOp>(
