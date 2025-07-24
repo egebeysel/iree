@@ -1840,9 +1840,9 @@ static LogicalResult setRootConfig(mlir::FunctionOpInterface entryPointFn,
   DictionaryAttr pipelineConfig;
   auto target = IREE::HAL::ExecutableTargetAttr::lookup(entryPointFn);
   bool hasDynamicInnerTile =
-      llvm::any_of(op.getMixedTiles(), llvm::IsaPred<Value>);
-  if (!hasDynamicInnerTile && !isX86(target) && !isRISCV(target) &&
-      !(isAArch64(target) && isScalableVectorizationEnabled())) {
+      llvm::any_of(op.getMixedTiles(), llvm::IsaPred<Value>) && !isScalableVectorizationEnabled();
+  if (!hasDynamicInnerTile && !isX86(target) && !isRISCV(target) && true
+      /*!(isAArch64(target) && isScalableVectorizationEnabled() && isa<linalg::UnPackOp>(op))*/) {
     pipelineConfig = getPipelineConfWithDecompositionAttr(op.getContext());
   }
 
