@@ -1897,18 +1897,21 @@ static LogicalResult setRootConfig(mlir::FunctionOpInterface entryPointFn,
   DictionaryAttr pipelineConfig;
   auto target = IREE::HAL::ExecutableTargetAttr::lookup(entryPointFn);
   bool hasDynamicInnerTile =
-      llvm::any_of(op.getMixedTiles(), llvm::IsaPred<Value>);
-  if (!hasDynamicInnerTile && !isX86(target) && !isRISCV(target) &&
-      !(isAArch64(target) && isScalableVectorizationEnabled())) {
+      llvm::any_of(op.getMixedTiles(), llvm::IsaPred<Value>) && !isScalableVectorizationEnabled();
+  if (!hasDynamicInnerTile && !isX86(target) && !isRISCV(target) && true
+      /*!(isAArch64(target) && isScalableVectorizationEnabled() && isa<linalg::UnPackOp>(op))*/) {
     pipelineConfig = getPipelineConfWithDecompositionAttr(op.getContext());
   }
 
   SmallVector<int64_t> vecTileSizes = getPackVectorTileSizes(entryPointFn, op);
   LoweringConfigGenerator generator(op);
   generator.setDistributionTileSizes(distTileSizes);
+  // Not necessary here since the tile sizes are on the unpacked domain.
+  // These should be propagated to the producers of the pack op, since they 
+  // should be aligned to the inner tile - or the source - sizes of the pack op.
   IREE::Codegen::ScalableTileFlags vecScalableTileFlags =
       getPackScalableTileFlags(entryPointFn, op);
-  generator.setVectorTileSizes(vecTileSizes, vecScalableTileFlags);
+  generator.setVectorTileSizes(vecTileSizes/* vecScalableTileFlags */);
   IREE::CPU::LoweringConfigAttr loweringConfig =
       generator.generateCPULoweringConfig();
   return setOpConfigAndEntryPointFnTranslation(

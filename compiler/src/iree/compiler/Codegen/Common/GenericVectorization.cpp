@@ -47,7 +47,7 @@ getVectorSizes(Operation *op, bool useConfiguredVectorSizes) {
     LDBG("Use configured vector sizes from lowering config");
     auto [vectorSizes, scalableFlags] = tilingConfig->getVectorTileSizes();
     if (auto unpackOp = dyn_cast<linalg::UnPackOp>(op)) {
-      if (llvm::any_of(scalableFlags, [](bool scalable) { return scalable; })) {
+      if (true || llvm::any_of(scalableFlags, [](bool scalable) { return scalable; })) {
         // TODO(egebeysel): This is just hacking and assuming to try out. Fix
         // this!
         auto sourceVectorSizes = vectorSizes;
