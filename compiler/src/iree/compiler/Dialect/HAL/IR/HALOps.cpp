@@ -9,13 +9,16 @@
 #include "iree/compiler/Dialect/HAL/IR/HALTypes.h"
 #include "iree/compiler/Dialect/Util/IR/UtilTypes.h"
 #include "llvm/ADT/STLExtras.h"
+#include "llvm/Support/CommandLine.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
+#include "mlir/Dialect/Vector/IR/VectorOps.h"
 #include "mlir/IR/Attributes.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinTypes.h"
 #include "mlir/IR/IRMapping.h"
 #include "mlir/IR/OpImplementation.h"
+#include "mlir/IR/PatternMatch.h"
 #include "mlir/IR/SymbolTable.h"
 #include "mlir/IR/TypeUtilities.h"
 #include "mlir/Interfaces/FunctionImplementation.h"
@@ -23,6 +26,12 @@
 #include "mlir/Interfaces/InferTypeOpInterface.h"
 
 namespace mlir::iree_compiler::IREE::HAL {
+
+static llvm::cl::opt<bool> clVscaleValue(
+    "iree-hal-vscale-value",
+    llvm::cl::desc(
+        "The value of vector.vscale op, this is a temporary flag #21590"),
+    llvm::cl::init(1));
 
 namespace {
 
@@ -1855,7 +1864,15 @@ calculateWorkgroupCountFromRegion(Location loc, Block *body, Value device,
   for (unsigned argNum : llvm::seq<unsigned>(0, numArgs)) {
     bvm.map(body->getArgument(/*device*/ 1 + argNum), workload[argNum]);
   }
+  IRRewriter rewriter(loc->getContext());
   for (Operation &op : body->without_terminator()) {
+    if (auto vscaleOp = dyn_cast<vector::VectorScaleOp>(op)) {
+      auto newCstVscaleOp =
+          builder.create<arith::ConstantIndexOp>(loc, clVscaleValue);
+      rewriter.replaceOp(vscaleOp, newCstVscaleOp);
+      builder.clone(*newCstVscaleOp, bvm);
+      continue;
+    }
     builder.clone(op, bvm);
   }
   auto returnOp = cast<IREE::HAL::ReturnOp>(body->getTerminator());
