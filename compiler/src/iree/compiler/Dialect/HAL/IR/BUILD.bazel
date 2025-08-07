@@ -91,6 +91,7 @@ iree_compiler_cc_library(
         "@llvm-project//mlir:Support",
         "@llvm-project//mlir:TransformUtils",
         "@llvm-project//mlir:ViewLikeInterface",
+        "@llvm-project//mlir::VectorDialect",
     ],
 )
 
