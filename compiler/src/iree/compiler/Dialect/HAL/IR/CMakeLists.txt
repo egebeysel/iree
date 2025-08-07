@@ -53,6 +53,7 @@ iree_cc_library(
     MLIRSideEffectInterfaces
     MLIRSupport
     MLIRTransformUtils
+    MLIRVectorDialect
     MLIRViewLikeInterface
     iree::compiler::Dialect::Stream::IR
     iree::compiler::Dialect::Util::IR
