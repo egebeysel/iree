@@ -685,31 +685,6 @@ static bool isInnerMostDimThatMapIsFunctionOf(AffineMap map, int dim) {
   return true;
 }
 
-static IREE::Codegen::ScalableTileFlags
-getPackScalableTileFlags(mlir::FunctionOpInterface entryPointFn,
-                         linalg::PackOp op) {
-  IREE::Codegen::ScalableTileFlags scalableTileFlags;
-  auto targetAttr = IREE::HAL::ExecutableTargetAttr::lookup(entryPointFn);
-  if (!hasAnySVEFeature(targetAttr))
-    return scalableTileFlags;
-  auto numLoops = op.getSourceRank();
-  auto tileMapping = op.getDimAndTileMapping();
-  IREE::Codegen::ScalableTileFlags vecScalableTileFlags;
-  for (auto dim = 0; dim < numLoops; ++dim) {
-    OpFoldResult tileSize = tileMapping.lookup(dim);
-    if (!tileSize) {
-      scalableTileFlags.push_back(false);
-      continue;
-    }
-    if (auto tileSizeVal = dyn_cast<Value>(tileSize)) {
-      scalableTileFlags.push_back(
-          isValueProducedByVscale(tileSizeVal.getDefiningOp()));
-      continue;
-    }
-  }
-  return scalableTileFlags;
-}
-
 static void limitVectorTileSizes(SmallVectorImpl<int64_t> &vecTileSizes,
                                  int64_t eachOperandMaxTileBits,
                                  int64_t allOperandsMaxTileBits,
@@ -1951,8 +1926,10 @@ getMmt4dLoweringConfig(linalg::LinalgOp op,
   // well.
   IREE::Codegen::ScalableTileFlags vecScalableTileFlags(mmt4dDimBase + 6,
                                                         false);
-  if (isAArch64(targetAttr) && isScalableVectorizationEnabled() &&
-      hasAnySVEFeature(targetAttr) && ShapedType::isDynamic(N0)) {
+  if (isAArch64(targetAttr.getConfiguration()) &&
+      isScalableVectorizationEnabled() &&
+      hasAnySVEFeature(targetAttr.getConfiguration()) &&
+      ShapedType::isDynamic(N0)) {
     // Essentially, we have to come up with a reasonable heuristic over here,
     // since the actual value that would make sense is unknown at compile-time.
     // Set the N0 dimension as scalable.
@@ -2080,11 +2057,6 @@ static LogicalResult setRootConfig(mlir::FunctionOpInterface entryPointFn,
   SmallVector<int64_t> vecTileSizes = getPackVectorTileSizes(entryPointFn, op);
   LoweringConfigGenerator generator(op);
   generator.setDistributionTileSizes(distTileSizes);
-  // Not necessary here since the tile sizes are on the unpacked domain.
-  // These should be propagated to the producers of the pack op, since they
-  // should be aligned to the inner tile - or the source - sizes of the pack op.
-  // IREE::Codegen::ScalableTileFlags vecScalableTileFlags =
-  //    getPackScalableTileFlags(entryPointFn, op);
   generator.setVectorTileSizes(vecTileSizes /* vecScalableTileFlags */);
   IREE::CPU::LoweringConfigAttr loweringConfig =
       generator.generateCPULoweringConfig();
@@ -2118,7 +2090,7 @@ static LogicalResult setRootConfig(mlir::FunctionOpInterface entryPointFn,
       vecTileSizes[pos] = size;
       continue;
     }
-    if (!hasAnySVEFeature(targetAttr))
+    if (!hasAnySVEFeature(targetAttr.getConfiguration()))
       continue;
     // Set SVE tile sizes w.r.t. scalable inner tile size.
     auto tileMapping = op.getDimAndTileMapping();
