@@ -239,7 +239,7 @@ void addMultiTilingExpertPassPipeline(
     case IREE::CPU::TilingLevel::CacheParallelTiles:
     case IREE::CPU::TilingLevel::VectorCommonParallelTiles:
       funcPassManager.addPass(
-          createLLVMCPUTileAndFuseProducerConsumerPass(level));
+          createLLVMCPUTileLastOpAndFuseProducerConsumerPass(level));
       break;
     case IREE::CPU::TilingLevel::CacheReductionTiles:
       funcPassManager.addPass(
