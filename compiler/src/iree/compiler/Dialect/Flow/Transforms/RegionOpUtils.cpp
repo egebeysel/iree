@@ -46,6 +46,18 @@ static llvm::cl::opt<int> clInlineConstantByteLength(
                    "into a dispatch region or 0 to disable inlining."),
     llvm::cl::init(256));
 
+static llvm::cl::opt<bool> clSoftmaxProducerFusion(
+    "iree-enable-softmax-producer-fusion",
+    llvm::cl::desc("Whether to enable fusing producers of softmax into the "
+                   "same region or not."),
+    llvm::cl::init(true));
+
+static llvm::cl::opt<bool> clPackAndUnpackFusion(
+    "iree-enable-pack-unpack-fusion",
+    llvm::cl::desc(
+        "Whether to enable fusing packs into the same regipon as unpacks"),
+    llvm::cl::init(true));
+
 namespace mlir::iree_compiler::IREE::Flow {
 
 //===----------------------------------------------------------------------===//
@@ -942,6 +954,26 @@ static bool hasUnfusableUseInDispatch(Value v, Operation *dispatchOp) {
     // Cannot fuse producer of `dest` with `tensor.insert_slice`.
     if (auto insertSliceUser = dyn_cast<tensor::InsertSliceOp>(user)) {
       if (insertSliceUser.getDest() == v)
+        return true;
+    }
+
+    // Currently, we cannot handle fusing unset encoding producers into the
+    // softmax.
+    // TODO: enable this when we actually can do this.
+    if (auto softmaxUser = dyn_cast<linalg::SoftmaxOp>(user)) {
+      if (isa<Encoding::UnsetEncodingOp>(v.getDefiningOp()) &&
+          !clSoftmaxProducerFusion)
+        return true;
+    }
+    // Currently, we cannot handle fusing unset encoding producers into regions
+    // that already have pack ops.
+    // TODO: enable this when we actually can do this.
+    if (isa<Encoding::UnsetEncodingOp>(v.getDefiningOp())) {
+      bool isSetEncodingInRegion = false;
+      owner->walk([&](Encoding::SetEncodingOp setEncodingOp) {
+        isSetEncodingInRegion = true;
+      });
+      if (isSetEncodingInRegion && !clPackAndUnpackFusion)
         return true;
     }
   }
