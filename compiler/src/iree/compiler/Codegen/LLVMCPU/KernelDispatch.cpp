@@ -3430,9 +3430,28 @@ setLoweringConfigForComputeOps(mlir::FunctionOpInterface entryPointFn,
                 IREE::CPU::CacheReductionTiles, rootOperation),
             falseVec);
       }
-      updateOrAddTilingLevelInfo(
-          newTilingInfo, IREE::CPU::VectorCommonParallelTiles,
-          commonVecTileSizes, commonVecScalableTileFlags);
+      if (isa<linalg::FillOp>(op) &&
+          isa<linalg::Mmt4DOp, linalg::BatchMmt4DOp>(rootOperation)) {
+        // TODO: This is currently just a hack to propagate the true tile sizes
+        // to the fill op. Use IterationDimTracker for this.
+        SmallVector<int64_t> fillVecTileSizes;
+        IREE::Codegen::ScalableTileFlags fillVecScalableFlags;
+        auto iterTypes =
+            cast<TilingInterface>(rootOperation).getLoopIteratorTypes();
+        for (auto [idx, iterType] : llvm::enumerate(iterTypes)) {
+          if (iterType == utils::IteratorType::parallel) {
+            fillVecTileSizes.emplace_back(commonVecTileSizes[idx]);
+            fillVecScalableFlags.emplace_back(commonVecScalableTileFlags[idx]);
+          }
+        }
+        updateOrAddTilingLevelInfo(newTilingInfo,
+                                   IREE::CPU::VectorCommonParallelTiles,
+                                   fillVecTileSizes, fillVecScalableFlags);
+      } else {
+        updateOrAddTilingLevelInfo(
+            newTilingInfo, IREE::CPU::VectorCommonParallelTiles,
+            commonVecTileSizes, commonVecScalableTileFlags);
+      }
       bool setUpOK =
           TypeSwitch<Operation *, bool>(op)
               .Case<linalg::PackOp>([&](auto packOp) {
