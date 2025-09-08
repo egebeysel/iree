@@ -29,6 +29,7 @@
 #include "mlir/Dialect/Affine/Passes.h"
 #include "mlir/Dialect/Arith/Transforms/Passes.h"
 #include "mlir/Dialect/ArmSME/Transforms/Passes.h"
+#include "mlir/Dialect/ArmSVE/Transforms/Passes.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/Linalg/Passes.h"
 #include "mlir/Dialect/MemRef/Transforms/Passes.h"
@@ -171,6 +172,7 @@ void buildLLVMCPUVectorLoweringPipeline(
     // lowerings if SME is not available.
     transferLoweringOptions.enableScalableLowerings = true;
   }
+  funcPassManager.addPass(arm_sve::createLegalizeVectorStoragePass());
   funcPassManager.addPass(
       createVectorTransferLoweringPass(transferLoweringOptions));
   funcPassManager.addPass(createLLVMCPUVectorTransposeLoweringPass(

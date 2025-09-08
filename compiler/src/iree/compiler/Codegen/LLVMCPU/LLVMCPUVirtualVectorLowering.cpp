@@ -8,6 +8,7 @@
 #include "iree/compiler/Codegen/LLVMCPU/Utils.h"
 #include "mlir/Dialect/ArmNeon/ArmNeonDialect.h"
 #include "mlir/Dialect/ArmNeon/Transforms.h"
+#include "mlir/Dialect/ArmSVE/Transforms/Transforms.h"
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
 #include "mlir/Dialect/Vector/Transforms/LoweringPatterns.h"
 #include "mlir/Dialect/Vector/Transforms/VectorTransforms.h"
@@ -65,6 +66,12 @@ void LLVMCPUVirtualVectorLoweringPass::runOnOperation() {
     if (enableArmI8mm) {
       RewritePatternSet patterns(ctx);
       arm_neon::populateLowerContractionToNeonI8MMPatterns(patterns);
+      populateLowerContractionToSVEI8MMPatterns(patterns);
+      (void)applyPatternsGreedily(funcOp, std::move(patterns));
+    }
+    if (/* enableBf16Flag */ true) {
+      RewritePatternSet patterns(ctx);
+      populateLowerContractionToSVEBFMMLAPatterns(patterns);
       (void)applyPatternsGreedily(funcOp, std::move(patterns));
     }
   }
