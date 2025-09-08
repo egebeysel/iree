@@ -1862,13 +1862,9 @@ getVectorInputSizesFromDestTiles(linalg::UnPackOp op,
                                  ArrayRef<int64_t> writeVectorSizes,
                                  ArrayRef<bool> scalableFlags) {
   assert(writeVectorSizes.size() == op.getDestRank());
-  if (llvm::any_of(scalableFlags, [](bool val) { return val == true; })) {
-    return std::nullopt;
-  }
 
   ArrayRef<int64_t> innerDimPos = op.getInnerDimsPos();
-  ArrayRef<int64_t> innerTiles = op.getStaticInnerTiles();
-  ArrayRef<int64_t> sourceShape = op.getSourceType().getShape();
+  SmallVector<OpFoldResult> innerTiles = op.getMixedTiles();
   ArrayRef<int64_t> outerDimsPerm = op.getOuterDimsPerm();
 
   // readVectorSizes is the size of tensor used to read and apply mask. It is
@@ -1890,19 +1886,53 @@ getVectorInputSizesFromDestTiles(linalg::UnPackOp op,
   //   After applying outer_dims_perm: [8, 16]
   //   After appending the rest of the sourceShape: [8, 16, 32, 16]
   SmallVector<int64_t> vectorSizes(writeVectorSizes);
-  for (auto [index, size] : enumerate(innerTiles)) {
+  SmallVector<bool> scalableFlagsVec(scalableFlags);
+  FailureOr<SizesAndScalableFlags> staticInnerTilesAndFlags =
+      getScalableTileSizesAndFlags(innerTiles);
+  if (failed(staticInnerTilesAndFlags)) {
+    LDBG() << "Static or scalable inner tile sizes cannot be inferred!";
+    return std::nullopt;
+  }
+  auto [staticInnerTileSizes, innerScalableFlags] =
+      staticInnerTilesAndFlags.value();
+  for (auto [index, size] : enumerate(staticInnerTileSizes)) {
+    if (innerScalableFlags[index]) {
+      // In the case of scalable inner tiles, we have to make sure that tile
+      // size is also scalable. If that is the case, we can infer the read size
+      // by just dividing the static sizes and flipping the scalable flag. For
+      // example, if we have [8, [14]] as tile sizes and [8, [8]] as the
+      // corresponding inner tile sizes, we can obtain
+      // [8/8 , divideCeil(14/8), 8, [8]] = [1, 2, 8, [8]].
+      //
+      // In the case of static tile sizes and scalable inner tile sizes, we
+      // cannot infer a static size for the outer dims.
+      //
+      // TODO(egebeysel): Technically speaking, in the existence of scalable
+      // inner tile sizes, we can infer a _safe_ upper bound on the outer dims
+      // and use these for vectorization, i.e. for [8, 14] and [8, [8]], we can
+      // conservatively assume that vscale = 1 and therefore set [1, 2, 8 [8]].
+      // Not sure how much sense this would make, but it should be semantically
+      // correct.
+      auto pos = innerDimPos[index];
+      if (!scalableFlagsVec[pos]) {
+        LDBG() << "Scalable inner tile sizes and static tile sizes are not "
+                  "supported!";
+        return std::nullopt;
+      }
+      scalableFlagsVec[pos] = false;
+    }
     vectorSizes[innerDimPos[index]] =
         llvm::divideCeil(vectorSizes[innerDimPos[index]], size);
   }
   if (!outerDimsPerm.empty()) {
     applyPermutationToVector(vectorSizes, outerDimsPerm);
+    applyPermutationToVector(scalableFlagsVec, outerDimsPerm);
   }
-  vectorSizes.append(sourceShape.begin() + vectorSizes.size(),
-                     sourceShape.end());
-
   SizesAndScalableFlags result;
+  vectorSizes.append(staticInnerTileSizes.begin(), staticInnerTileSizes.end());
+  scalableFlagsVec.append(innerScalableFlags.begin(), innerScalableFlags.end());
   result.first.assign(vectorSizes.begin(), vectorSizes.end());
-  result.second.resize(result.first.size(), false);
+  result.second.assign(scalableFlagsVec.begin(), scalableFlagsVec.end());
 
   return result;
 }
