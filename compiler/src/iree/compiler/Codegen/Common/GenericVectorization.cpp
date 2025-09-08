@@ -198,8 +198,13 @@ void GenericVectorizationPass::runOnOperation() {
       (void)IREE::VectorExt::vectorizeLinalgExtGatherToTransferGather(
           rewriter, gatherOp, vectorSizes);
     } else {
-      FailureOr<linalg::VectorizationResult> result = linalg::vectorize(
-          rewriter, op, vectorSizes, scalableVecDims, vectorizeGatherAccesses);
+      FailureOr<linalg::VectorizationResult> result =
+          linalg::vectorize(rewriter, op, vectorSizes, scalableVecDims,
+                            vectorizeGatherAccesses, false,
+                            /* assumeScalableSizesMultipleOfDim */
+                            isa<linalg::Mmt4DOp, linalg::BatchMmt4DOp>(op),
+                            /* createNamedContraction */
+                            isa<linalg::Mmt4DOp, linalg::BatchMmt4DOp>(op));
       if (succeeded(result)) {
         rewriter.replaceOp(op, result->replacements);
       }
