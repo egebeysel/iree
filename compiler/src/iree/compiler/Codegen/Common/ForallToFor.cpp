@@ -15,6 +15,7 @@
 #include "mlir/IR/ValueRange.h"
 #include "mlir/IR/Visitors.h"
 #include "mlir/Pass/Pass.h"
+#include "mlir/Transforms/GreedyPatternRewriteDriver.h"
 
 #include <cassert>
 
@@ -90,6 +91,16 @@ struct ForallToForPass : impl::ForallToForPassBase<ForallToForPass> {
   void runOnOperation() override {
     mlir::FunctionOpInterface funcOp = getOperation();
     IRRewriter rewriter(funcOp->getContext());
+
+    {
+      RewritePatternSet patterns(funcOp->getContext());
+      scf::ForallOp::getCanonicalizationPatterns(patterns,
+                                                 funcOp->getContext());
+      if (failed(applyPatternsGreedily(funcOp, std::move(patterns)))) {
+        funcOp.emitOpError("scf forall canonicalization failed");
+        return signalPassFailure();
+      }
+    }
 
     // Find `scf.forall` ops we want to convert.
     SmallVector<scf::ForallOp> forallOps;
