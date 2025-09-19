@@ -33,6 +33,7 @@
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/Linalg/Passes.h"
 #include "mlir/Dialect/MemRef/Transforms/Passes.h"
+#include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/Dialect/Utils/IndexingUtils.h"
 #include "mlir/IR/BuiltinTypeInterfaces.h"
 #include "mlir/Pass/PassManager.h"
@@ -397,6 +398,9 @@ void addMmt4dTilingExpertPassPipeline(
       createCPULowerToUKernelsPass(clSkipIntermediateRoundings));
   funcPassManager.addPass(createLLVMCPUTileRootAndFuseInputOperandsPass(
       IREE::CPU::TilingLevel::VectorReductionTiles));
+  funcPassManager.addPass(createCanonicalizerPass());
+  funcPassManager.addPass(createCSEPass());
+  funcPassManager.addPass(createCanonicalizerPass());
   funcPassManager.addPass(iree_compiler::createForallToForPass());
 
   {
