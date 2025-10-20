@@ -464,7 +464,14 @@ static SmallVector<TileMxNxK> enumerateMatmulTileArm64(TypeRange elementTypes,
   if (out.isF32() || out.isF16() || out.isBF16()) {
     if (lhs.isBF16() && rhs.isBF16() && (out.isBF16() || out.isF32()) &&
         hasFeature(config, "+bf16")) {
-      return {
+        if (hasFeature(config, "+sve") || hasFeature(config, "+sve2")) {
+          return {
+            TileMxNxK{8, 8, 4}, // Aim to use BFMMLA.
+            TileMxNxK{4, 8, 4}, // Truncation of the above.
+            TileMxNxK{2, 8, 4}, // Truncation of the above.
+          };
+        }
+        return {
           TileMxNxK{8, 8, 4}, // Aim to use BFMMLA.
           TileMxNxK{4, 8, 4}, // Truncation of the above.
           TileMxNxK{2, 8, 4}, // Truncation of the above.
