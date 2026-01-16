@@ -66,14 +66,32 @@ namespace {
 // Utilities.
 //===----------------------------------------------------------------------===//
 
+/// Determines which tile dimensions should be scalable for a given target.
+/// For AArch64 SVE/SVE2 and RISC-V with the V extension, the N dimension is
+/// made scalable to take advantage of scalable vector registers.
+/// Returns failure if scalable tiling is not applicable for the target.
 static FailureOr<IREE::Codegen::ScalableTileFlags>
 getScalableTileFlags(linalg::ContractionDimensions cDims,
                      IREE::Encoding::EncodingAttr encoding,
                      DictionaryAttr config) {
   // TODO(egebeysel): I think this isScalable*Enabled flag should be temporary
   // and the temporary SME flag should probably come next to it.
-  if (!isAArch64(config) || !isScalableVectorizationEnabled()) {
-    LDBG() << "Pre-conditions to enable scalable tiling are not met!";
+  if (!isScalableVectorizationEnabled()) {
+    LDBG() << "Scalable vectorization is not enabled!";
+    return failure();
+  }
+
+  // Check if target supports scalable vectors.
+  bool isAArch64Target = isAArch64(config);
+  bool isRISCV64Target = isRISCV64(config);
+  bool hasAArch64ScalableSupport =
+      isAArch64Target &&
+      (hasFeature(config, "+sve") || hasFeature(config, "+sve2"));
+  // RISC-V V extension uses scalable vectors. vscale = VLEN/64 by convention.
+  bool hasRISCVScalableSupport = isRISCV64Target && hasFeature(config, "+v");
+
+  if (!hasAArch64ScalableSupport && !hasRISCVScalableSupport) {
+    LDBG() << "Target does not support scalable vectors!";
     return failure();
   }
 
@@ -85,7 +103,9 @@ getScalableTileFlags(linalg::ContractionDimensions cDims,
                       : encoding.mapDimToOperandIndex(cDims.n[0]);
   std::optional<unsigned> kDim = encoding.mapDimToOperandIndex(cDims.k[0]);
   IREE::Codegen::ScalableTileFlags scalableTiles;
-  // TODO(egebeysel): Add logic for SME.
+
+  // M dimension: fixed for both AArch64 SVE and RISC-V V extension.
+  // TODO(egebeysel): Add logic for SME which may have scalable M.
   if (mDim.has_value()) {
     if (hasFeature(config, "+sme")) {
       LDBG() << "SME with data-tiling is not supported yet!";
@@ -93,10 +113,16 @@ getScalableTileFlags(linalg::ContractionDimensions cDims,
     }
     scalableTiles.push_back(false);
   }
+
+  // N dimension: scalable for both AArch64 SVE/SVE2 and RISC-V V extension.
+  // This allows the tile to grow with the vector register length.
   if (nDim.has_value()) {
-    scalableTiles.push_back(hasFeature(config, "+sve") ||
-                            hasFeature(config, "+sve2"));
+    scalableTiles.push_back(hasAArch64ScalableSupport ||
+                            hasRISCVScalableSupport);
   }
+
+  // K dimension: fixed for both targets. The reduction dimension does not
+  // benefit from scalability in the same way as the N dimension.
   if (kDim.has_value()) {
     scalableTiles.push_back(false);
   }
@@ -384,83 +410,71 @@ enumerateMatmulTileRiscv32(DictionaryAttr config) {
   // Fallback - no architecture-optimized tile size for this case.
   return {};
 }
-// RISC-V has vector register length extensions: zvl128b, zvl256b etc.
-// If these extension are specified in target cpu feature,
-// they can be used to determine VLEN. This function assumes that
-// 'v' feature is present
-size_t getRISCVVVlenFromCPUFeatures(DictionaryAttr config) {
-  // If +zvl* feature is not explicitly specified,
-  // fallback to +zvl128b, as spec specifies minimum VLEN
-  // of 128b for the V extension: https://rb.gy/p8rbzv
-  size_t vlen;
-  if (hasFeature(config, "+zvl65536b")) {
-    vlen = 65536;
-  } else if (hasFeature(config, "+zvl32768b")) {
-    vlen = 32768;
-  } else if (hasFeature(config, "+zvl16384b")) {
-    vlen = 16384;
-  } else if (hasFeature(config, "+zvl8192b")) {
-    vlen = 8192;
-  } else if (hasFeature(config, "+zvl4096b")) {
-    vlen = 4096;
-  } else if (hasFeature(config, "+zvl2048b")) {
-    vlen = 2048;
-  } else if (hasFeature(config, "+zvl1024b")) {
-    vlen = 1024;
-  } else if (hasFeature(config, "+zvl512b")) {
-    vlen = 512;
-  } else if (hasFeature(config, "+zvl256b")) {
-    vlen = 256;
-  } else {
-    vlen = 128;
-  }
-  return vlen;
-}
+
 // Enumerate tile sizes to choose from on riscv64.
 // For narrow-{M,N} cases, this only enumerates on narrow M. The narrow-N cases
 // are handled by transposition in chooseMatmulTile.
+//
+// For the V extension, we use scalable tile sizes where the N dimension scales
+// with vscale (VLEN/64). The base tile sizes assume VLEN=64 bits, meaning
+// vscale=1 at the minimum. When scalable vectorization is enabled, these base
+// sizes will be multiplied by vscale at runtime to utilize the full vector
+// register width.
+//
+// Base tile calculation for VLEN=64:
+//   - f32 (32 bits): 64/32 = 2 elements per vscale
+//   - f16 (16 bits): 64/16 = 4 elements per vscale
 static SmallVector<TileMxNxK>
 enumerateMatmulTileRiscv64(TypeRange elementTypes, DictionaryAttr config) {
-
-  // Data-Tiling is only implemented for the V extension
+  // Data-tiling is only implemented for the V extension.
   if (!hasFeature(config, "+v")) {
     return {};
   }
-  size_t vlen = getRISCVVVlenFromCPUFeatures(config);
+
   assert(elementTypes.size() == 3);
   Type lhs = elementTypes[0];
   Type rhs = elementTypes[1];
   Type out = elementTypes[2];
+
+  // Base N tile size assuming VLEN=64 bits. This will be scaled by vscale
+  // at runtime when scalable vectorization is enabled.
+  // For f32: 64 bits / 32 bits = 2 elements * 4
+  constexpr int64_t kBaseNF32 = 8;
+  // For f16: 64 bits / 16 bits = 4 elements * 4
+  constexpr int64_t kBaseNF16 = 16;
+
   if (lhs.isF32() && rhs.isF32() && out.isF32()) {
-    // VLEN-aware Tile size selection
-    // One concern that needs to be addressed here is that
-    // for larger VLENs tile sizes would be very large
-    // leading to a very high padding overhead
-    int N0 = vlen / 8;
+    // Using M=7 aims for high register utilization with vfmacc instructions.
+    // The N dimension uses the base size which scales with vscale.
     return {
-        TileMxNxK{7, N0, 1}, // Aim to use vfmacc, 100% register utilization.
-        TileMxNxK{4, N0, 1}, // Truncation of the above.
-        TileMxNxK{2, N0, 1}, // Truncation of the above.
-        TileMxNxK{1, N0, 1}, // Truncation of the above.
+        TileMxNxK{7, kBaseNF32, 1}, // Aim to use vfmacc.
+        TileMxNxK{4, kBaseNF32, 1}, // Truncation of the above.
+        TileMxNxK{2, kBaseNF32, 1}, // Truncation of the above.
+        TileMxNxK{1, kBaseNF32, 1}, // Truncation of the above.
     };
   }
+
   if (lhs.isF16() && rhs.isF16()) {
-    int N0 = vlen / 8;
     if (hasFeature(config, "+zvfh")) {
+      // Native f16 arithmetic support.
       return {
-          TileMxNxK{7, N0, 1}, TileMxNxK{4, N0, 1}, // Truncation of the above.
-          TileMxNxK{2, N0, 1},                      // Truncation of the above.
-          TileMxNxK{1, N0, 1},                      // Truncation of the above.
+          TileMxNxK{7, kBaseNF16, 1},
+          TileMxNxK{4, kBaseNF16, 1}, // Truncation of the above.
+          TileMxNxK{2, kBaseNF16, 1}, // Truncation of the above.
+          TileMxNxK{1, kBaseNF16, 1}, // Truncation of the above.
       };
     }
     if (hasFeature(config, "+zvfhmin")) {
+      // Minimal f16 support (conversion only, compute in f32).
       return {
-          TileMxNxK{6, N0, 1}, TileMxNxK{4, N0, 1}, // Truncation of the above.
-          TileMxNxK{2, N0, 1},                      // Truncation of the above.
-          TileMxNxK{1, N0, 1},                      // Truncation of the above.
+          TileMxNxK{6, kBaseNF16, 1},
+          TileMxNxK{4, kBaseNF16, 1}, // Truncation of the above.
+          TileMxNxK{2, kBaseNF16, 1}, // Truncation of the above.
+          TileMxNxK{1, kBaseNF16, 1}, // Truncation of the above.
       };
     }
   }
+
   // Fallback - no architecture-optimized tile size for this case.
   return {};
 }
