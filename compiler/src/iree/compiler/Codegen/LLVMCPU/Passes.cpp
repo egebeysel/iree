@@ -389,6 +389,9 @@ void addMmt4dTilingExpertPassPipeline(
       createCPULowerToUKernelsPass(clSkipIntermediateRoundings));
   funcPassManager.addPass(createLLVMCPUTileRootAndFuseInputOperandsPass(
       IREE::CPU::TilingLevel::VectorReductionTiles));
+  funcPassManager.addPass(createCanonicalizerPass());
+  funcPassManager.addPass(createCSEPass());
+  funcPassManager.addPass(createCanonicalizerPass());
   // `VectorInnerParallelTiles` level models the tiling and fusion for the
   // dimensions that are not captured in root op. I.e., root op may not have the
   // config for the level. Thus, we use the last operation that has the tiling
