@@ -1943,7 +1943,8 @@ static bool adjustVectorSizesForScalableVectorization(
     LDBG() << "SME is not supported yet!";
     return false;
   }
-  if (hasAnySVEFeature(targetConfig) && ShapedType::isDynamic(n0)) {
+  if ((hasAnySVEFeature(targetConfig) || hasAnyVFeature(targetConfig)) &&
+      ShapedType::isDynamic(n0)) {
     // Set the corresponding scalable tile size and flag for the inner N
     // dimension, i.e. n1 from the iteration domain ([b, ], m0, n0, k0, m1, n1,
     // k1). The inner M dimension is not considered here, because SVE currently
