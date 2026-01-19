@@ -95,7 +95,7 @@ void LLVMCPULowerExecutableTargetPass::runOnOperation() {
   LoweringConfigAttrInterface loweringConfig = getRootLoweringConfig(funcOp);
   auto pipeline = translationInfo.getDispatchLoweringPassPipeline();
   LLVMCPUPipelineOptions pipelineOpts;
-  if (isX86(targetConfig) || isRISCV(targetConfig)) {
+  if (isX86(targetConfig)) {
     pipelineOpts.useConfiguredVectorSizes = false;
   }
   pipelineOpts.decomposePackUnPackOps =
