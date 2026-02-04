@@ -6,6 +6,7 @@
 
 #include "iree/compiler/Codegen/Common/Passes.h"
 #include "iree/compiler/Codegen/Dialect/Codegen/IR/IREECodegenAttrs.h"
+#include "iree/compiler/Codegen/Dialect/Codegen/IR/IREECodegenEnums.h"
 #include "iree/compiler/Codegen/Dialect/Codegen/IR/IREECodegenInterfaces.h"
 #include "iree/compiler/Codegen/Dialect/VectorExt/IR/VectorExtDialect.h"
 #include "iree/compiler/Codegen/Dialect/VectorExt/Transforms/Transforms.h"
@@ -45,6 +46,7 @@ getVectorSizes(Operation *op, bool useConfiguredVectorSizes) {
       if (scalableFlags.empty()) {
         scalableFlags.assign(vectorSizes->size(), false);
       }
+      bool vectorSizesInferred = true;
       if (auto unpackOp = dyn_cast<linalg::UnPackOp>(op)) {
         std::optional<SizesAndScalableFlags> maybeInputVectorSizes =
             getVectorInputSizesFromDestTiles(unpackOp, *vectorSizes,
@@ -53,7 +55,7 @@ getVectorSizes(Operation *op, bool useConfiguredVectorSizes) {
           std::tie(vectorSizes, scalableFlags) = maybeInputVectorSizes.value();
         } else {
           LDBG() << "Failed to get input vector sizes for unpack op";
-          return std::nullopt;
+          vectorSizesInferred = false;
         }
       }
       if (auto packOp = dyn_cast<linalg::PackOp>(op)) {
@@ -64,12 +66,15 @@ getVectorSizes(Operation *op, bool useConfiguredVectorSizes) {
           std::tie(vectorSizes, scalableFlags) = maybeInputVectorSizes.value();
         } else {
           LDBG() << "Failed to get input vector sizes for pack op";
-          return std::nullopt;
+          vectorSizesInferred = false;
         }
       }
-      // Replace zeros in canonical vector shape to turn it into a valid shape.
-      std::replace(vectorSizes->begin(), vectorSizes->end(), 0, 1);
-      return std::make_pair(*vectorSizes, scalableFlags);
+      if (vectorSizesInferred) {
+        // Replace zeros in canonical vector shape to turn it into a valid
+        // shape.
+        std::replace(vectorSizes->begin(), vectorSizes->end(), 0, 1);
+        return std::make_pair(*vectorSizes, scalableFlags);
+      }
     }
     LDBG() << "Failed to get configured vector sizes, fall back to inference";
   }
@@ -90,6 +95,7 @@ getVectorSizes(Operation *op, bool useConfiguredVectorSizes) {
         std::optional<VectorizationTileSizes> result = inferSizesFromIR(op);
         if (result) {
           vectorSizes = result->vectorSizes;
+          scalableFlags = result->vectorScalableFlags;
         }
       })
       .Case<tensor::PadOp>([&](tensor::PadOp padOp) {

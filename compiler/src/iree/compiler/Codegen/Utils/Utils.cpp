@@ -38,6 +38,7 @@
 #include "mlir/IR/AffineExprVisitor.h"
 #include "mlir/IR/Attributes.h"
 #include "mlir/IR/BuiltinAttributes.h"
+#include "mlir/IR/BuiltinTypeInterfaces.h"
 #include "mlir/IR/Matchers.h"
 #include "mlir/IR/SymbolTable.h"
 #include "mlir/Interfaces/TilingInterface.h"
@@ -1741,6 +1742,31 @@ bool isFullSlice(OffsetSizeAndStrideOpInterface sliceLoadStoreOp,
 // Utility functions for vector size inference for dynamic shapes
 //===----------------------------------------------------------------------===//
 
+static std::optional<SizesAndScalableFlags>
+inferScalableSizesFromIR(ShapedType type, ArrayRef<OpFoldResult> innerTiles) {
+  SmallVector<int64_t> vectorSizes;
+  SmallVector<bool> vectorScalableFlags;
+  std::optional<SizesAndScalableFlags> staticInnerTilesAndFlags =
+      getScalableTileSizesAndFlags(innerTiles);
+  if (!staticInnerTilesAndFlags) {
+    return std::nullopt;
+  }
+  unsigned outerDims = type.getRank() - innerTiles.size();
+  for (unsigned pos = 0; pos < outerDims; ++pos) {
+    int64_t dim = type.getDimSize(pos);
+    if (dim == ShapedType::kDynamic) {
+      LDBG() << "Dynamic outer dimensions found while inferring scalable "
+                "vector sizes!";
+      return std::nullopt;
+    }
+    vectorSizes.push_back(dim);
+    vectorScalableFlags.push_back(false);
+  }
+  vectorSizes.append(staticInnerTilesAndFlags->first);
+  vectorScalableFlags.append(staticInnerTilesAndFlags->second);
+  return SizesAndScalableFlags{vectorSizes, vectorScalableFlags};
+}
+
 std::optional<VectorizationTileSizes> inferSizesFromIR(scf::ForOp forOp,
                                                        OpResult opResult) {
   LDBG() << "Inferring sizes for: " << forOp;
@@ -1919,9 +1945,9 @@ getVectorInputSizesFromDestTiles(linalg::UnPackOp op,
   //   After appending the rest of the sourceShape: [8, 16, 32, 16]
   SmallVector<int64_t> vectorSizes(writeVectorSizes);
   SmallVector<bool> scalableFlagsVec(scalableFlags);
-  FailureOr<SizesAndScalableFlags> staticInnerTilesAndFlags =
+  std::optional<SizesAndScalableFlags> staticInnerTilesAndFlags =
       getScalableTileSizesAndFlags(innerTiles);
-  if (failed(staticInnerTilesAndFlags)) {
+  if (!staticInnerTilesAndFlags) {
     LDBG() << "Static or scalable inner tile sizes cannot be inferred!";
     return std::nullopt;
   }
@@ -1975,8 +2001,16 @@ std::optional<VectorizationTileSizes> inferSizesFromIR(linalg::UnPackOp op) {
   if (llvm::any_of(op.getInnerTiles(), [](OpFoldResult v) {
         return !getConstantIntValue(v).has_value();
       })) {
-    LDBG() << "failed on inference because inner_tiles are not all constant";
-    return std::nullopt;
+    auto unpackType = op.getSourceType();
+    std::optional<SizesAndScalableFlags> sizesAndScalableFlags =
+        inferScalableSizesFromIR(unpackType, op.getMixedTiles());
+    if (!sizesAndScalableFlags) {
+      LDBG() << "failed on inference because inner_tiles are not all constant";
+      return std::nullopt;
+    }
+    return VectorizationTileSizes{llvm::to_vector(unpackType.getShape()),
+                                  sizesAndScalableFlags->first,
+                                  sizesAndScalableFlags->second};
   }
 
   VectorizationTileSizes result;
