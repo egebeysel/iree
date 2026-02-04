@@ -10,6 +10,7 @@
 #include "iree/compiler/Codegen/Interfaces/PartitionableLoopsInterface.h"
 #include "iree/compiler/Codegen/Utils/Utils.h"
 #include "iree/compiler/Dialect/LinalgExt/IR/LinalgExtDialect.h"
+#include "iree/compiler/Dialect/TensorExt/IR/TensorExtOps.h"
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/SmallVector.h"
 #include "mlir/Dialect/Affine/IR/AffineOps.h"
@@ -18,6 +19,7 @@
 #include "mlir/Dialect/MemRef/Transforms/Transforms.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/Dialect/SCF/Transforms/TileUsingInterface.h"
+#include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/Dialect/Tensor/Transforms/Transforms.h"
 #include "mlir/Dialect/Utils/StaticValueUtils.h"
 #include "mlir/IR/OpDefinition.h"
@@ -364,6 +366,23 @@ void TileAndDistributeToWorkgroupsUsingForallOpPass::runOnOperation() {
       });
     }
     std::swap(tileAndFuseResult->loops, tilingLoops);
+
+    // TODO(egebeysel): This might not be the most optimal place to run this,
+    // although the IR should be in a valid state and the patterns should not
+    // cause a problem. Apply folding patterns, especially to fold `tensor.dim`
+    // ops when possible. This helps while fusing unpack ops as consumers in the
+    // case of scalable tiles.
+    {
+      RewritePatternSet patterns(context);
+      tensor::DimOp::getCanonicalizationPatterns(patterns, context);
+      tensor::EmptyOp::getCanonicalizationPatterns(patterns, context);
+      IREE::TensorExt::DispatchTensorLoadOp::getCanonicalizationPatterns(
+          patterns, context);
+      if (failed(applyPatternsGreedily(funcOp, std::move(patterns)))) {
+        funcOp.emitOpError("tiling canonicalization failed");
+        return signalPassFailure();
+      }
+    }
 
     FailureOr<std::queue<Operation *>> newFusionOpportunities =
         fuseConsumersIntoForall(

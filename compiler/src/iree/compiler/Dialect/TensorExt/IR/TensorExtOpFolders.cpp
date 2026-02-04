@@ -6,8 +6,10 @@
 
 #include "iree/compiler/Dialect/TensorExt/IR/TensorExtOps.h"
 #include "iree/compiler/Utils/ShapeUtils.h"
+#include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Arith/Utils/Utils.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
+#include "mlir/Dialect/Utils/StaticValueUtils.h"
 
 namespace mlir::iree_compiler::IREE::TensorExt {
 
@@ -273,6 +275,31 @@ struct DispatchTensorLoadOpWithOffsetSizesAndStridesConstantArgumentFolder final
   }
 };
 
+/// Pattern to fold the `tensor.dim` op of a dispatch tensor load op onto the
+/// corresponding size.
+struct FoldDispatchTensorLoadOpWithDimOp final
+    : public OpRewritePattern<tensor::DimOp> {
+  using Base::Base;
+  LogicalResult matchAndRewrite(tensor::DimOp dimOp,
+                                PatternRewriter &rewriter) const override {
+    std::optional<int64_t> maybeConstantIndex = dimOp.getConstantIndex();
+    auto loadOp = dimOp.getSource().getDefiningOp<DispatchTensorLoadOp>();
+    if (!loadOp || !maybeConstantIndex)
+      return failure();
+    OpFoldResult dimSize = loadOp.getMixedSizes()[*maybeConstantIndex];
+    Operation *newOp;
+    if (auto dynValue = dyn_cast<Value>(dimSize)) {
+      newOp = dynValue.getDefiningOp();
+    } else {
+      auto constantOp = arith::ConstantIndexOp::create(
+          rewriter, dimOp->getLoc(), *getConstantIntValue(dimSize));
+      newOp = constantOp;
+    }
+    rewriter.replaceOp(dimOp, newOp);
+    return success();
+  }
+};
+
 } // namespace
 
 void DispatchTensorLoadOp::getCanonicalizationPatterns(
@@ -282,6 +309,7 @@ void DispatchTensorLoadOp::getCanonicalizationPatterns(
   results.insert<
       DispatchTensorLoadOpWithOffsetSizesAndStridesConstantArgumentFolder>(
       context);
+  results.insert<FoldDispatchTensorLoadOpWithDimOp>(context);
 }
 
 // Inlining producers of an input to the dispatch region results in the
