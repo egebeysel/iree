@@ -13,6 +13,7 @@
 #include "iree/compiler/Codegen/Utils/Utils.h"
 #include "llvm/Support/DebugLog.h"
 #include "mlir/Dialect/Affine/LoopUtils.h"
+#include "mlir/Dialect/Linalg/IR/Linalg.h"
 #include "mlir/Dialect/Linalg/Transforms/Hoisting.h"
 #include "mlir/Dialect/Linalg/Transforms/Transforms.h"
 #include "mlir/Dialect/MemRef/Transforms/Passes.h"
@@ -208,11 +209,22 @@ void GenericVectorizationPass::runOnOperation() {
       (void)IREE::VectorExt::vectorizeLinalgExtGatherToTransferGather(
           rewriter, gatherOp, vectorSizes);
     } else {
+      auto translationInfo = getTranslationInfo(funcOp);
+      // Currently, any operation that is in the same dispatch as an mmt4d with
+      // the exception of pack and unpack are in the data-tiled layouts and do
+      // not need masks.
+      // TODO(egebeysel): this logic is brittle and we need a proper analysis
+      // here to distinguish operations that have data-tiled layouts from those
+      // that do not.
+      bool assumeDynamicDimsMatchVecSizes =
+          translationInfo &&
+          translationInfo.getDispatchLoweringPassPipeline() ==
+              IREE::Codegen::DispatchLoweringPassPipeline::Mmt4dTilingExpert &&
+          !isa<linalg::PackOp, linalg::UnPackOp>(op);
       FailureOr<linalg::VectorizationResult> result = linalg::vectorize(
           rewriter, op, vectorSizes, scalableVecDims,
           /*vectorizeNDExtract=*/true, /*flatten1DDepthwiseConv=*/false,
-          /*assumeDynamicDimsMatchVecSizes=*/
-          isa<linalg::Mmt4DOp, linalg::BatchMmt4DOp>(op),
+          /*assumeDynamicDimsMatchVecSizes=*/assumeDynamicDimsMatchVecSizes,
           /*createNamedContraction=*/
           isa<linalg::Mmt4DOp, linalg::BatchMmt4DOp>(op));
       if (succeeded(result)) {
