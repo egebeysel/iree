@@ -1,5 +1,6 @@
 // RUN: iree-opt --pass-pipeline="builtin.module(func.func(iree-llvmcpu-tile{tiling-level=distribution}))" --split-input-file %s | FileCheck %s
 // RUN: iree-opt --pass-pipeline="builtin.module(func.func(iree-llvmcpu-tile{tiling-level=vector_common_parallel skip-root-op=true}))" --split-input-file %s | FileCheck %s --check-prefix=SKIP-ROOT
+// RUN: iree-opt --pass-pipeline="builtin.module(func.func(iree-llvmcpu-tile{tiling-level=vector_common_parallel}, cse))" --split-input-file %s | FileCheck %s --check-prefix=VECTOR
 
 #config0 = #iree_cpu.lowering_config<distribution = [10, 20]>
 #config1 = #iree_cpu.lowering_config<distribution = [10, 20, 30]>
@@ -138,3 +139,44 @@ func.func @matmul_bias_add_skip_matmul(%arg0 : tensor<?x?xf32>, %arg1 : tensor<?
 // SKIP-ROOT:   scf.for
 // SKIP-ROOT:     scf.for
 // SKIP-ROOT:       linalg.generic
+
+// -----
+
+#config = #iree_cpu.lowering_config<distribution = [14, [16]], vector_common_parallel = [7, [8]]>
+func.func @scalable_unpack(%arg0: tensor<12x?x7x?xf32>) -> tensor<80x320xf32> {
+  %c8 = arith.constant 8 : index
+  %vscale = vector.vscale
+  %c8_vscale = arith.muli %vscale, %c8 : index
+  %empty = tensor.empty() : tensor<80x320xf32>
+  %unpack = linalg.unpack %arg0 outer_dims_perm = [0, 1] inner_dims_pos = [0, 1] inner_tiles = [7, %c8_vscale] into %empty {lowering_config = #config} : tensor<12x?x7x?xf32> -> tensor<80x320xf32>
+  return %unpack : tensor<80x320xf32>
+}
+// The vector tile equals the scalable inner tile on the N dim (Equal).
+// VECTOR-LABEL: func.func @scalable_unpack
+// VECTOR-DAG:     %[[C7:.+]] = arith.constant 7 : index
+// VECTOR-DAG:     %[[C8:.+]] = arith.constant 8 : index
+// VECTOR-DAG:     %[[VS:.+]] = vector.vscale
+// VECTOR:         %[[C8VS:.+]] = arith.muli %[[VS]], %[[C8]] : index
+// VECTOR:         scf.for {{.*}} step %c7
+// VECTOR:           scf.for {{.*}} step %[[C8VS]]
+// VECTOR:             linalg.unpack {{.*}} inner_tiles = [7, %[[C8VS]]]
+// VECTOR-SAME:           tensor<1x1x7x?xf32> -> tensor<?x?xf32>
+// VECTOR:             scf.yield
+// VECTOR:          scf.yield
+
+// The distribution tile is twice the scalable inner tile on the N dim (Multiple).
+// CHECK-LABEL: func.func @scalable_unpack
+// CHECK-DAG:     %[[C14:.+]] = arith.constant 14 : index
+// CHECK-DAG:     %[[C16:.+]] = arith.constant 16 : index
+// CHECK-DAG:     %[[C8:.+]] = arith.constant 8 : index
+// CHECK-DAG:     %[[VS:.+]] = vector.vscale
+// CHECK:         %[[C8VS:.+]] = arith.muli %[[VS]], %[[C8]] : index
+// CHECK:         %[[VS:.+]] = vector.vscale
+// CHECK-DAG:     %[[C16VS:.+]] = arith.muli %[[VS]], %[[C16]] : index
+// CHECK:         scf.for {{.*}} step %[[C14]]
+// CHECK:           scf.for {{.*}} step %[[C16VS]]
+// CHECK:             linalg.unpack {{.*}} inner_tiles = [7, %[[C8VS]]]
+// If we land on the unaligned case, there would be an extract_slice from the result of the unpack.
+// CHECK-NOT:         tensor.extract_slice
+// CHECK:             scf.yield
+// CHECK:          scf.yield

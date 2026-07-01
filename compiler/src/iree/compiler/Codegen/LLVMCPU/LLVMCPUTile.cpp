@@ -4,6 +4,7 @@
 // See https://llvm.org/LICENSE.txt for license information.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
+#include "iree/compiler/Codegen/Common/TileAndFuseUtils.h"
 #include "iree/compiler/Codegen/Dialect/Codegen/IR/IREECodegenAttrs.h"
 #include "iree/compiler/Codegen/LLVMCPU/Passes.h"
 #include "iree/compiler/Codegen/LLVMCPU/Utils.h"
@@ -53,6 +54,22 @@ void LLVMCPUTilePass::runOnOperation() {
   }
   MLIRContext *context = &getContext();
   mlir::FunctionOpInterface funcOp = getOperation();
+
+  // Caller-asserted alignment of a tiled `linalg.unpack` op's scalable inner
+  // tiles to the loop tile sizes. `linalg.pack` op tiling is based on result
+  // outer dimensions. For vector-level tile sizes, we select the tile sizes
+  // equal to the inner tile sizes of the `linalg.unpack` op, for
+  // distribution-level, it is a multiple of it.
+  auto tilingLevelVal = tilingLevel.getValue();
+  scf::InnerTileAlignmentFnTy innerTileAlignmentFn = makeInnerTileAlignmentFn(
+      llvm::any_of(
+          ArrayRef<IREE::CPU::TilingLevel>{
+              IREE::CPU::TilingLevel::VectorCommonParallelTiles,
+              IREE::CPU::TilingLevel::VectorReductionTiles,
+              IREE::CPU::TilingLevel::VectorInnerParallelTiles},
+          [tilingLevelVal](auto level) { return level == tilingLevelVal; })
+          ? mlir::InnerTileAlignment::Equal
+          : mlir::InnerTileAlignment::Multiple);
 
   SmallVector<Operation *> computeOps = getComputeOps(funcOp);
   for (auto computeOp : computeOps) {
@@ -104,6 +121,7 @@ void LLVMCPUTilePass::runOnOperation() {
     scf::SCFTilingOptions options{};
     setSCFTileSizes(options, op, std::move(tileSizes),
                     std::move(tileScalableFlags));
+    options.setInnerTileAlignmentFn(innerTileAlignmentFn);
     FailureOr<scf::SCFTilingResult> tiledResults =
         scf::tileUsingSCF(rewriter, op, options);
     if (failed(tiledResults)) {
