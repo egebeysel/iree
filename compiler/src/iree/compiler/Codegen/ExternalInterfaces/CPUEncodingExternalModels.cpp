@@ -72,6 +72,55 @@ namespace {
 // Utilities.
 //===----------------------------------------------------------------------===//
 
+// RISC-V has vector register length extensions: zvl128b, zvl256b etc.
+// If these extension are specified in target cpu feature,
+// they can be used to determine VLEN. This function assumes that
+// 'v' feature is present
+static size_t getRISCVVVlenFromCPUFeatures(DictionaryAttr config) {
+  // If +zvl* feature is not explicitly specified,
+  // fallback to +zvl128b, as spec specifies minimum VLEN
+  // of 128b for the V extension: https://rb.gy/p8rbzv
+  size_t vlen;
+  if (hasFeature(config, "+zvl65536b")) {
+    vlen = 65536;
+  } else if (hasFeature(config, "+zvl32768b")) {
+    vlen = 32768;
+  } else if (hasFeature(config, "+zvl16384b")) {
+    vlen = 16384;
+  } else if (hasFeature(config, "+zvl8192b")) {
+    vlen = 8192;
+  } else if (hasFeature(config, "+zvl4096b")) {
+    vlen = 4096;
+  } else if (hasFeature(config, "+zvl2048b")) {
+    vlen = 2048;
+  } else if (hasFeature(config, "+zvl1024b")) {
+    vlen = 1024;
+  } else if (hasFeature(config, "+zvl512b")) {
+    vlen = 512;
+  } else if (hasFeature(config, "+zvl256b")) {
+    vlen = 256;
+  } else {
+    vlen = 128;
+  }
+  return vlen;
+}
+
+/// Returns the vector register length in bits to use for VLEN-parameterized
+/// ISAs, or 0 if the target has none. This is the single decoding point from
+/// target features to VLEN: the intrinsic candidate list, the cost model, the
+/// tile-shape helpers and the `vlen` stamped on the `DataTiledMMAAttr` all
+/// read it, so they cannot disagree. Returns 0 under scalable vectorization,
+/// where `getScalableTileFlags` owns the layout instead.
+static int64_t getVlenBitsForConfig(DictionaryAttr config) {
+  if (!config || isScalableVectorizationEnabled()) {
+    return 0;
+  }
+  if (isRISCV64(config) && hasFeature(config, "+v")) {
+    return static_cast<int64_t>(getRISCVVVlenFromCPUFeatures(config));
+  }
+  return 0;
+}
+
 /// Determines which tile dimensions should be scalable for a given target.
 /// For AArch64 SVE/SVE2 and RISC-V with the V extension (when not using static
 /// vectors), the N dimension is made scalable to take advantage of scalable
@@ -431,7 +480,8 @@ pickGenericScalarMMAForTarget(DictionaryAttr config) {
 /// `DataTiledMMAAttr`-based extraction for it (passing null element types
 /// to the attr would invalidate the resulting vector types).
 static bool isMmaIntrinsicArrayValid(MLIRContext *ctx,
-                                     ArrayRef<IREE::CPU::MMAIntrinsic> arr) {
+                                     ArrayRef<IREE::CPU::MMAIntrinsic> arr,
+                                     int64_t vlen) {
   using IREE::CPU::DataTiledMMAAttr;
   using IREE::CPU::MMAIntrinsic;
 
@@ -454,7 +504,7 @@ static bool isMmaIntrinsicArrayValid(MLIRContext *ctx,
   // `ui8` LHS visibly swaps with its sibling's `ui8` RHS. Read directly
   // from `getABCElementTypes`; `getUndistributedTileTypes` would strip it.
   auto getShapeAndTypes = [&](MMAIntrinsic intr) {
-    auto mnk = IREE::CPU::getRowMajorTilesMNKShape(intr);
+    auto mnk = IREE::CPU::getRowMajorTilesMNKShape(intr, vlen);
     assert(mnk && "validator only handles row-major-tile intrinsics");
     auto [m, n, k] = *mnk;
     auto [lhs, rhs, acc] = IREE::CPU::getABCElementTypes(ctx, intr);
@@ -554,7 +604,8 @@ getMmaIntrinsicsForTargetConfig(DictionaryAttr config) {
     }
   }
   out.push_back(pickGenericScalarMMAForTarget(config));
-  assert(isMmaIntrinsicArrayValid(config.getContext(), out) &&
+  assert(isMmaIntrinsicArrayValid(config.getContext(), out,
+                                 getVlenBitsForConfig(config)) &&
          "getMmaIntrinsicsForTargetConfig must return a list satisfying the "
          "conventions in IREECPUEnums.td (strictly increasing, paired "
          "natural/swapped entries, etc.)");
@@ -578,7 +629,7 @@ struct IntrinsicInfo {
 /// generic-scalar branch of `chooseUnrolling` doesn't read them.
 static std::optional<IntrinsicInfo>
 getIntrinsicInfo(MLIRContext *ctx, ArrayRef<Type> elementTypes,
-                 IREE::CPU::MMAIntrinsic intr) {
+                 IREE::CPU::MMAIntrinsic intr, int64_t vlen) {
   if (IREE::CPU::isGenericScalar(intr)) {
     if (elementTypes.size() != 3 || !elementTypes[0] || !elementTypes[1] ||
         !elementTypes[2]) {
@@ -599,7 +650,7 @@ getIntrinsicInfo(MLIRContext *ctx, ArrayRef<Type> elementTypes,
       accTy != elementTypes[2]) {
     return std::nullopt;
   }
-  auto mnk = IREE::CPU::getRowMajorTilesMNKShape(intr);
+  auto mnk = IREE::CPU::getRowMajorTilesMNKShape(intr, vlen);
   if (!mnk) {
     return std::nullopt;
   }
@@ -632,7 +683,7 @@ getIntrinsicInfo(MLIRContext *ctx, ArrayRef<Type> elementTypes,
 /// Returns nullopt if no compatible intrinsic exists.
 static IREE::CPU::MMAIntrinsic
 chooseIntrinsic(MLIRContext *ctx, ArrayRef<Type> elementTypes,
-                DictionaryAttr config,
+                DictionaryAttr config, int64_t vlen,
                 const IREE::Encoding::BxMxNxKxKb &matmulSizes) {
   auto usefulSize = [](int64_t matmulSize, int64_t intrinsicSize) -> int64_t {
     return ShapedType::isDynamic(matmulSize)
@@ -643,7 +694,7 @@ chooseIntrinsic(MLIRContext *ctx, ArrayRef<Type> elementTypes,
   std::pair<int64_t, int64_t> bestScore = {-1, -1};
   for (IREE::CPU::MMAIntrinsic intr : getMmaIntrinsicsForTargetConfig(config)) {
     std::optional<IntrinsicInfo> info =
-        getIntrinsicInfo(ctx, elementTypes, intr);
+        getIntrinsicInfo(ctx, elementTypes, intr, vlen);
     if (!info) {
       continue;
     }
@@ -697,9 +748,10 @@ static int64_t unrollCap(int64_t matmulSize, int64_t intrinsicSize,
 // tiling outright.
 static std::optional<std::tuple<int64_t, int64_t, int64_t>>
 chooseUnrolling(MLIRContext *ctx, ArrayRef<Type> elementTypes,
-                IREE::CPU::MMAIntrinsic intr,
+                IREE::CPU::MMAIntrinsic intr, int64_t vlen,
                 const IREE::Encoding::BxMxNxKxKb &matmulSizes) {
-  std::optional<IntrinsicInfo> info = getIntrinsicInfo(ctx, elementTypes, intr);
+  std::optional<IntrinsicInfo> info =
+      getIntrinsicInfo(ctx, elementTypes, intr, vlen);
   if (!info) {
     return std::nullopt;
   }
@@ -728,7 +780,7 @@ chooseUnrolling(MLIRContext *ctx, ArrayRef<Type> elementTypes,
     budget = IREE::CPU::getGenericScalarRegisterBudget(intr);
     accUnit = lhsUnit = rhsUnit = 1;
   } else {
-    budget = IREE::CPU::getRegisterSpaceBytes(intr) * 8;
+    budget = IREE::CPU::getRegisterSpaceBytes(intr, vlen) * 8;
     accUnit = info->accBits;
     lhsUnit = info->lhsBits;
     rhsUnit = info->rhsBits;
@@ -783,13 +835,16 @@ chooseCpuInnerTiledMmaForEncoding(MLIRContext *ctx,
   if (failed(matmulSizes)) {
     return {};
   }
+  // Resolved once, here, so the value the cost model uses is provably the
+  // value stamped on the attribute.
+  int64_t vlen = getVlenBitsForConfig(config);
   IREE::CPU::MMAIntrinsic intr =
-      chooseIntrinsic(ctx, elementTypes, config, *matmulSizes);
+      chooseIntrinsic(ctx, elementTypes, config, vlen, *matmulSizes);
   if (intr == IREE::CPU::MMAIntrinsic::None) {
     return {};
   }
   std::optional<std::tuple<int64_t, int64_t, int64_t>> unroll =
-      chooseUnrolling(ctx, elementTypes, intr, *matmulSizes);
+      chooseUnrolling(ctx, elementTypes, intr, vlen, *matmulSizes);
   if (!unroll) {
     return {};
   }
@@ -803,9 +858,9 @@ chooseCpuInnerTiledMmaForEncoding(MLIRContext *ctx,
     rhsType = elementTypes[1];
     accType = elementTypes[2];
   }
-  return IREE::CPU::DataTiledMMAAttr::get(ctx, intr, intrinsicsM, intrinsicsN,
-                                          intrinsicsK, lhsType, rhsType,
-                                          accType);
+  return IREE::CPU::DataTiledMMAAttr::get(
+      ctx, intr, intrinsicsM, intrinsicsN, intrinsicsK, lhsType, rhsType,
+      accType, IREE::CPU::isVlenParameterized(intr) ? vlen : 0);
 }
 
 /// Lowers a contraction under a `CPUEncodingResolverAttr` with
@@ -1116,38 +1171,6 @@ enumerateMatmulTileRiscv32(DictionaryAttr config) {
   }
   // Fallback - no architecture-optimized tile size for this case.
   return {};
-}
-// RISC-V has vector register length extensions: zvl128b, zvl256b etc.
-// If these extension are specified in target cpu feature,
-// they can be used to determine VLEN. This function assumes that
-// 'v' feature is present
-size_t getRISCVVVlenFromCPUFeatures(DictionaryAttr config) {
-  // If +zvl* feature is not explicitly specified,
-  // fallback to +zvl128b, as spec specifies minimum VLEN
-  // of 128b for the V extension: https://rb.gy/p8rbzv
-  size_t vlen;
-  if (hasFeature(config, "+zvl65536b")) {
-    vlen = 65536;
-  } else if (hasFeature(config, "+zvl32768b")) {
-    vlen = 32768;
-  } else if (hasFeature(config, "+zvl16384b")) {
-    vlen = 16384;
-  } else if (hasFeature(config, "+zvl8192b")) {
-    vlen = 8192;
-  } else if (hasFeature(config, "+zvl4096b")) {
-    vlen = 4096;
-  } else if (hasFeature(config, "+zvl2048b")) {
-    vlen = 2048;
-  } else if (hasFeature(config, "+zvl1024b")) {
-    vlen = 1024;
-  } else if (hasFeature(config, "+zvl512b")) {
-    vlen = 512;
-  } else if (hasFeature(config, "+zvl256b")) {
-    vlen = 256;
-  } else {
-    vlen = 128;
-  }
-  return vlen;
 }
 // Enumerate tile sizes to choose from on riscv64.
 // For narrow-{M,N} cases, this only enumerates on narrow M. The narrow-N cases

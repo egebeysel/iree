@@ -444,7 +444,7 @@ InnerTileAlignmentsAttr InnerTileAlignmentsAttr::getFromOp(Operation *op) {
 // row-major tile layout, don't look at this function, go directly to
 // getIntrinsicSwizzle.
 std::optional<std::tuple<int64_t, int64_t, int64_t>>
-getRowMajorTilesMNKShape(MMAIntrinsic intrinsic) {
+getRowMajorTilesMNKShape(MMAIntrinsic intrinsic, int64_t vlen) {
   using Tuple = std::tuple<int64_t, int64_t, int64_t>;
   switch (intrinsic) {
   case MMAIntrinsic::None:
@@ -507,10 +507,16 @@ constexpr uint32_t kMMAIntrinsicGenericBudgetMask = 0x00FF;
 constexpr uint32_t kMMAIntrinsicISAX86Avx2 = 0x1200;
 constexpr uint32_t kMMAIntrinsicISAX86Avx512 = 0x1300;
 constexpr uint32_t kMMAIntrinsicISAArmSve = 0x2200;
+constexpr uint32_t kMMAIntrinsicISARiscvV = 0x3100;
 
 bool isGenericScalar(MMAIntrinsic intr) {
   return (static_cast<uint32_t>(intr) & kMMAIntrinsicISAMask) ==
          kMMAIntrinsicISAGeneric;
+}
+
+bool isVlenParameterized(MMAIntrinsic intr) {
+  return (static_cast<uint32_t>(intr) & kMMAIntrinsicISAMask) ==
+         kMMAIntrinsicISARiscvV;
 }
 
 int64_t getGenericScalarRegisterBudget(MMAIntrinsic intr) {
@@ -518,7 +524,7 @@ int64_t getGenericScalarRegisterBudget(MMAIntrinsic intr) {
   return static_cast<uint32_t>(intr) & kMMAIntrinsicGenericBudgetMask;
 }
 
-int64_t getRegisterSpaceBytes(MMAIntrinsic intrinsic) {
+int64_t getRegisterSpaceBytes(MMAIntrinsic intrinsic, int64_t vlen) {
   // Total architectural vector register file size, in bytes. The inner-tiled
   // cost model uses this as the capacity for the union of the ACC, LHS and
   // RHS tiles. For scalable ISAs we treat the vector length as its minimum
@@ -560,7 +566,7 @@ static Codegen::TileSwizzle fixupSwizzle(Codegen::TileSwizzle swizzle) {
 }
 
 Codegen::TileSwizzle getIntrinsicSwizzle(IREE::CPU::MMAIntrinsic mma,
-                                         int operandIdx) {
+                                         int operandIdx, int64_t vlen) {
   using TileSwizzle = Codegen::TileSwizzle;
   using Dim = TileSwizzle::Dim;
 
@@ -601,7 +607,7 @@ Codegen::TileSwizzle getIntrinsicSwizzle(IREE::CPU::MMAIntrinsic mma,
     return swizzle;
   }
 
-  auto maybeMnkTuple = getRowMajorTilesMNKShape(mma);
+  auto maybeMnkTuple = getRowMajorTilesMNKShape(mma, vlen);
   if (!maybeMnkTuple) {
     // Whenever one adds support for a new intrinsic that doesn't have a
     // row-major tile layout, new logic goes here.
@@ -639,7 +645,8 @@ Codegen::TileSwizzle getIntrinsicSwizzle(IREE::CPU::MMAIntrinsic mma,
 Codegen::TileSwizzle getSwizzle(IREE::CPU::DataTiledMMAAttr mma,
                                 int operandIdx) {
   using TileSwizzle = Codegen::TileSwizzle;
-  TileSwizzle swizzle = getIntrinsicSwizzle(mma.getIntrinsic(), operandIdx);
+  TileSwizzle swizzle =
+      getIntrinsicSwizzle(mma.getIntrinsic(), operandIdx, mma.getVlen());
   TileSwizzle::Dim intrinsicsM =
       TileSwizzle::Dim::crossIntrinsic(mma.getIntrinsicsM());
   TileSwizzle::Dim intrinsicsN =
@@ -756,6 +763,26 @@ getABCElementTypes(MLIRContext *context, IREE::CPU::DataTiledMMAAttr attr) {
 //===----------------------------------------------------------------------===//
 // DataTiledMMA Attributes
 //===----------------------------------------------------------------------===//
+
+LogicalResult DataTiledMMAAttr::verify(
+    function_ref<InFlightDiagnostic()> emitError, MMAIntrinsic intrinsic,
+    int64_t intrinsics_m, int64_t intrinsics_n, int64_t intrinsics_k,
+    Type lhs_type, Type rhs_type, Type acc_type, int64_t vlen) {
+  if (isVlenParameterized(intrinsic)) {
+    // A power of two >= 128, the V extension's architectural minimum VLEN.
+    if (vlen < 128 || (vlen & (vlen - 1)) != 0) {
+      return emitError() << "intrinsic " << stringifyMMAIntrinsic(intrinsic)
+                         << " is VLEN-parameterized and requires `vlen` to be "
+                            "a power of two >= 128; got "
+                         << vlen;
+    }
+  } else if (vlen != 0) {
+    return emitError() << "`vlen` is only meaningful for VLEN-parameterized "
+                          "intrinsics; got vlen = "
+                       << vlen;
+  }
+  return success();
+}
 
 int64_t DataTiledMMAAttr::getExpectedNumInputs() const { return 2; }
 

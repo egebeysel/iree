@@ -127,7 +127,17 @@ def IREECPU_DataTiledMMAAttr
           DefaultValuedParameter<
               "::mlir::Type", "::mlir::Type()",
               "ACC element type, used only by type-polymorphic intrinsics "
-              "such as MMA_GENERIC_SCALAR_1x1x1.">:$acc_type);
+              "such as MMA_GENERIC_SCALAR_1x1x1.">:$acc_type,
+          DefaultValuedParameter<
+              "int64_t", "0",
+              "Vector register length in bits, for ISAs whose intrinsic tile "
+              "shape and register budget are a function of an "
+              "implementation-defined vector length (RISC-V V). Resolved at "
+              "selection time from the target's `+zvl*b` features. 0 means "
+              "not applicable: the enum value alone pins the tile shape down. "
+              "See `isVlenParameterized`.">:$vlen);
+
+  let genVerifyDecl = 1;
 }
 
 //===----------------------------------------------------------------------===//

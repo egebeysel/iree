@@ -63,8 +63,11 @@ SmallVector<int> getTilingLevelsAsInts();
 /// Returns the corresponding key string for `level`.
 StringRef getTilingLevelName(TilingLevel level);
 
-// Returns the TileSwizzle for the given intrinsic and operand index.
-Codegen::TileSwizzle getIntrinsicSwizzle(MMAIntrinsic mma, int operandIdx);
+// Returns the TileSwizzle for the given intrinsic and operand index. `vlen`
+// is the target's vector register length in bits for VLEN-parameterized ISAs
+// (RISC-V V); pass 0 for every other ISA.
+Codegen::TileSwizzle getIntrinsicSwizzle(MMAIntrinsic mma, int operandIdx,
+                                         int64_t vlen);
 
 // Returns the TileSwizzle for the given MMA attr and operand index.
 Codegen::TileSwizzle getSwizzle(DataTiledMMAAttr mma, int operandIdx);
@@ -75,11 +78,19 @@ Codegen::TileSwizzle getSwizzle(DataTiledMMAAttr mma, int operandIdx);
 // treated as its 128-bit minimum — a deliberate simplification that produces
 // good-enough `intrinsics_m`/`intrinsics_n` choices without leaking
 // scalability into the cost model.
-// Values: AVX/AVX2 = 16 × 32 B, AVX-512 = 32 × 64 B, SVE/SVE2 = 32 × 16 B.
-int64_t getRegisterSpaceBytes(MMAIntrinsic intrinsic);
+// VLEN-parameterized ISAs instead scale with `vlen`, which the caller
+// resolves from the target's features; pass 0 for every other ISA.
+// Values: AVX/AVX2 = 16 × 32 B, AVX-512 = 32 × 64 B, SVE/SVE2 = 32 × 16 B,
+// RISC-V V = 32 × (vlen/8) B.
+int64_t getRegisterSpaceBytes(MMAIntrinsic intrinsic, int64_t vlen);
 
 // True if `intr` is one of the `MMA_GENERIC_SCALAR_1x1x1_REG*` cases.
 bool isGenericScalar(MMAIntrinsic intr);
+
+// True if `intr`'s tile shape and register budget depend on the target's
+// implementation-defined vector length, i.e. it needs a non-zero `vlen` on
+// the `DataTiledMMAAttr`. Only RISC-V V today.
+bool isVlenParameterized(MMAIntrinsic intr);
 
 // For an `MMA_GENERIC_SCALAR_1x1x1_REG*` intrinsic, returns the register
 // budget encoded in the enum case (8 or 16). Asserts otherwise.
@@ -94,9 +105,10 @@ std::tuple<Type, Type, Type> getABCElementTypes(MLIRContext *ctx,
                                                 MMAIntrinsic intrinsic);
 
 // Returns the (M, N, K) tile shape for a row-major-tile intrinsic, or
-// nullopt otherwise (e.g. SVE).
+// nullopt otherwise (e.g. SVE, or a VLEN-parameterized intrinsic given an
+// unusable `vlen`). `vlen` is as in `getRegisterSpaceBytes`.
 std::optional<std::tuple<int64_t, int64_t, int64_t>>
-getRowMajorTilesMNKShape(MMAIntrinsic intrinsic);
+getRowMajorTilesMNKShape(MMAIntrinsic intrinsic, int64_t vlen);
 
 // Idempotently attaches the bitcode for ukernel `name` as
 // `hal.executable.objects` on `op`, looking it up first in any
