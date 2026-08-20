@@ -83,6 +83,9 @@ class IREECPU_I32EnumAttr<string name, string summary,
 //     - 1 is NEON.
 //     - 2 is SVE/SVE2.
 //     - 3 is SME/SME2.
+//   - For RISC-V:
+//     - 1 is V (RVV, the standard vector extension; the Zve*/Zvf*
+//       sub-extensions differ only in nibble C).
 // * C denotes the element type of the A-matrix (LHS):
 //   * 0 = float64 (IEEE754 half precision).
 //   * 1 = float32 (IEEE754 half precision).
@@ -172,6 +175,20 @@ def MMA_ARM_SVE_FMLA_1x4VLx1_F32_F32
 def MMA_ARM_SVE_FMLA_4VLx1x1_F32_F32
     : I32EnumAttrCase<"MMA_ARM_SVE_FMLA_4VLx1x1_F32_F32", 0x2211>;
 
+// RISC-V V `vfmacc.vf` (f32, f32): a 1xVLsx1 matmul tile, or VLsx1x1 in the
+// M<->N-swapped orientation. `VLs` is a *static* lane count -- unlike SVE's
+// scalable `4VL` -- equal to `vlen / 8`, i.e. VLMAX for f32m4: one LMUL=4
+// register group at the target's VLEN. The concrete value is not in the name;
+// it comes from the `vlen` parameter on `DataTiledMMAAttr`, resolved at
+// selection time from the target's `+zvl*b` features. The LHS is a scalar
+// broadcast out of an FP register (the `.vf` form), not a vector operand.
+// Mirrors the mmt4d ukernel's `vfloat32m4_t acc0..acc6` in
+// runtime/src/iree/builtins/ukernel/arch/riscv_64/mmt4d_riscv_64_v.c.
+def MMA_RISCV_V_VFMACC_1xVLsx1_F32_F32
+    : I32EnumAttrCase<"MMA_RISCV_V_VFMACC_1xVLsx1_F32_F32", 0x3110>;
+def MMA_RISCV_V_VFMACC_VLsx1x1_F32_F32
+    : I32EnumAttrCase<"MMA_RISCV_V_VFMACC_VLsx1x1_F32_F32", 0x3111>;
+
 // Architecture-agnostic, type-polymorphic generic-scalar fallback. Tile
 // shape is 1×1×1, lowering is a single `vector.contract` over the
 // unrolled (`intrinsics_m`, `intrinsics_n`, `intrinsics_k`) tile. Unlike
@@ -219,6 +236,10 @@ def IREECPU_MMAIntrinsic
 
            // Arm SVE
            MMA_ARM_SVE_FMLA_1x4VLx1_F32_F32, MMA_ARM_SVE_FMLA_4VLx1x1_F32_F32,
+
+           // RISC-V V
+           MMA_RISCV_V_VFMACC_1xVLsx1_F32_F32,
+           MMA_RISCV_V_VFMACC_VLsx1x1_F32_F32,
 
            // Architecture-agnostic generic-scalar fallback (type-polymorphic).
            MMA_GENERIC_SCALAR_1x1x1_REG8, MMA_GENERIC_SCALAR_1x1x1_REG16]>;

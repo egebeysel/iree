@@ -487,6 +487,20 @@ getRowMajorTilesMNKShape(MMAIntrinsic intrinsic, int64_t vlen) {
   // ACC tile has a non-row-major layout, hand-rolled in `getIntrinsicSwizzle`.
   case MMAIntrinsic::MMA_X86_AVX512VNNI_16x16x2_I32_I8_CASTI16:
     return Tuple{16, 16, 2};
+  // VLs = vlen / 8 lanes = VLMAX for f32m4 (LMUL=4 * vlen / 32 bits-per-f32),
+  // the same expression as the mmt4d path's `int N0 = vlen / 8;`. Returning
+  // nullopt on an unusable `vlen` rather than a degenerate tile is what makes
+  // a missing/zero `vlen` benign: `getIntrinsicInfo` just skips the candidate.
+  case MMAIntrinsic::MMA_RISCV_V_VFMACC_1xVLsx1_F32_F32:
+  case MMAIntrinsic::MMA_RISCV_V_VFMACC_VLsx1x1_F32_F32: {
+    if (vlen < 128 || (vlen % 32) != 0) {
+      return {};
+    }
+    int64_t vl = vlen / 8;
+    bool transposed =
+        intrinsic == MMAIntrinsic::MMA_RISCV_V_VFMACC_VLsx1x1_F32_F32;
+    return transposed ? Tuple{vl, 1, 1} : Tuple{1, vl, 1};
+  }
   default:
     if (isGenericScalar(intrinsic)) {
       return Tuple{1, 1, 1};
@@ -538,6 +552,8 @@ int64_t getRegisterSpaceBytes(MMAIntrinsic intrinsic, int64_t vlen) {
     return 16 * 32;
   case kMMAIntrinsicISAX86Avx512: // 32 ZMM × 64 B.
     return 32 * 64;
+  case kMMAIntrinsicISARiscvV: // 32 v × (vlen / 8) bytes.
+    return vlen >= 128 ? 32 * (vlen / 8) : 16 * 32;
   case kMMAIntrinsicISAArmSve: // 32 Z × (VL treated as 128 bits).
     return 32 * 16;
   default:
@@ -735,6 +751,8 @@ std::tuple<Type, Type, Type> getABCElementTypes(MLIRContext *ctx,
     return {i8, IntegerType::get(ctx, 8, IntegerType::Unsigned), i32};
   case MMAIntrinsic::MMA_ARM_SVE_FMLA_1x4VLx1_F32_F32:
   case MMAIntrinsic::MMA_ARM_SVE_FMLA_4VLx1x1_F32_F32:
+  case MMAIntrinsic::MMA_RISCV_V_VFMACC_1xVLsx1_F32_F32:
+  case MMAIntrinsic::MMA_RISCV_V_VFMACC_VLsx1x1_F32_F32:
     return {f32, f32, f32};
   default:
     return {Type(), Type(), Type()};

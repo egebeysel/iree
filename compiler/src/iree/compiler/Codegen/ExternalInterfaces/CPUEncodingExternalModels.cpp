@@ -434,6 +434,12 @@ getMmaIntrinsicRequiredFeatures(IREE::CPU::MMAIntrinsic intr) {
   case MMAIntrinsic::MMA_X86_AVX512VNNI_16x1x4_I32_I8_UI8:
   case MMAIntrinsic::MMA_X86_AVX512VNNI_16x16x2_I32_I8_CASTI16:
     return {"+avx512vnni"};
+  case MMAIntrinsic::MMA_RISCV_V_VFMACC_1xVLsx1_F32_F32:
+  case MMAIntrinsic::MMA_RISCV_V_VFMACC_VLsx1x1_F32_F32:
+    // Just the V extension: its architectural minimum VLEN is 128, which
+    // `getRISCVVVlenFromCPUFeatures` already falls back to, so requiring a
+    // specific `+zvl*b` would wrongly exclude plain `+v` targets.
+    return {"+v"};
   default:
     return {};
   }
@@ -593,6 +599,25 @@ getMmaIntrinsicsForTargetConfig(DictionaryAttr config) {
         MMAIntrinsic::MMA_X86_AVX512VNNI_16x16x2_I32_I8_CASTI16,
     };
     for (MMAIntrinsic intr : kAllX86) {
+      SmallVector<StringRef> required = getMmaIntrinsicRequiredFeatures(intr);
+      if (required.empty()) {
+        continue;
+      }
+      if (llvm::all_of(required,
+                       [&](StringRef f) { return hasFeature(config, f); })) {
+        out.push_back(intr);
+      }
+    }
+  }
+  // RISC-V V. Gating on `getVlenBitsForConfig` rather than re-spelling
+  // isRISCV64 && +v && !scalable keeps the candidate list, the cost model and
+  // the `vlen` on the attribute reading one predicate.
+  if (getVlenBitsForConfig(config) != 0) {
+    static const MMAIntrinsic kAllRiscvV[] = {
+        MMAIntrinsic::MMA_RISCV_V_VFMACC_1xVLsx1_F32_F32,
+        MMAIntrinsic::MMA_RISCV_V_VFMACC_VLsx1x1_F32_F32,
+    };
+    for (MMAIntrinsic intr : kAllRiscvV) {
       SmallVector<StringRef> required = getMmaIntrinsicRequiredFeatures(intr);
       if (required.empty()) {
         continue;
