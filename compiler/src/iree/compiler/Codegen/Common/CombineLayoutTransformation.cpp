@@ -279,9 +279,14 @@ static void buildNestedDistributionLoops(
   DistributionConfig distConfig = distConfigs[distributionLevel];
   SmallVector<OpFoldResult> steps =
       getAsIndexOpFoldResult(rewriter.getContext(), distConfig.tileSizes);
+  // An empty mapping means that the loop is not distributed, so create the
+  // scf.forall without a mapping attribute.
+  std::optional<ArrayAttr> mapping;
+  if (!distConfig.mapping.empty()) {
+    mapping = rewriter.getArrayAttr(distConfig.mapping);
+  }
   scf::ForallOp::create(
-      rewriter, loc, lbs, ubs, steps, /*outputs=*/ValueRange(),
-      rewriter.getArrayAttr(distConfig.mapping),
+      rewriter, loc, lbs, ubs, steps, /*outputs=*/ValueRange(), mapping,
       /*bodyBuilder=*/[&](OpBuilder &b, Location nestedLoc, ValueRange ivs) {
         SmallVector<OpFoldResult> nestedLbs(ivs);
         SmallVector<OpFoldResult> nestedUbs;
@@ -933,12 +938,30 @@ combineLayoutTransformation(MLIRContext *ctx, FunctionOpInterface funcOp,
 }
 
 /// TODO(#20530): Improve heuristic for tile size selection.
+static SmallVector<int64_t>
+getDefaultPadTileSizes(ArrayRef<int64_t> iterationBounds) {
+  SmallVector<int64_t> tileSizes(iterationBounds.size(), 1);
+  tileSizes.back() = 64;
+  return tileSizes;
+}
+
+/// Distribution config for dispatches that are not distributed to workgroups:
+/// the pad values are written by an scf.forall without a mapping, which is
+/// later lowered to sequential loops.
+static SmallVector<DistributionConfig>
+defaultPadNoDistributionConfigFn(ArrayRef<int64_t> iterationBounds,
+                                 MLIRContext *ctx) {
+  DistributionConfig config;
+  config.tileSizes = getDefaultPadTileSizes(iterationBounds);
+  return {config};
+}
+
 static SmallVector<DistributionConfig>
 defaultPadWorkgroupDistributionConfigFn(ArrayRef<int64_t> iterationBounds,
                                         MLIRContext *ctx) {
   DistributionConfig workgroupDistributionConfig;
-  workgroupDistributionConfig.tileSizes.assign(iterationBounds.size(), 1);
-  workgroupDistributionConfig.tileSizes.back() = 64;
+  workgroupDistributionConfig.tileSizes =
+      getDefaultPadTileSizes(iterationBounds);
   workgroupDistributionConfig.mapping = llvm::map_to_vector(
       llvm::seq<int64_t>(iterationBounds.size()),
       [&](int64_t dim) -> Attribute {
@@ -1049,10 +1072,12 @@ struct CombineResultLayoutTransformationPass final
     CombineRelayoutOpsControlFn controlFn =
         getCombineRelayoutOpsControlFn(this->scope);
     bool doReshapesByExpansion = shouldDoReshapesByExpansion(this->scope);
-    if (failed(
-            combineLayoutTransformation(&getContext(), getOperation(),
-                                        defaultPadWorkgroupDistributionConfigFn,
-                                        doReshapesByExpansion, controlFn))) {
+    PadDistributionConfigFn padDistributionConfigFn =
+        distributeToWorkgroups ? defaultPadWorkgroupDistributionConfigFn
+                               : defaultPadNoDistributionConfigFn;
+    if (failed(combineLayoutTransformation(&getContext(), getOperation(),
+                                           padDistributionConfigFn,
+                                           doReshapesByExpansion, controlFn))) {
       return signalPassFailure();
     }
 

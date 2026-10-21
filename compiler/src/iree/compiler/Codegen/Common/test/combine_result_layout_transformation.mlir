@@ -4,6 +4,8 @@
 // RUN:   -split-input-file %s | FileCheck %s --check-prefixes=WORKGROUP-SCOPE
 // RUN: iree-opt --pass-pipeline="builtin.module(func.func(iree-codegen-combine-result-layout-transformation{scope=dispatch-reshape},canonicalize,cse))" \
 // RUN:   -split-input-file %s | FileCheck %s --check-prefixes=RESHAPE-SCOPE
+// RUN: iree-opt --pass-pipeline="builtin.module(func.func(iree-codegen-combine-result-layout-transformation{scope=dispatch-reshape distribute-to-workgroups=false},canonicalize,cse))" \
+// RUN:   -split-input-file %s | FileCheck %s --check-prefixes=RESHAPE-NO-DIST
 // Scalarize the index transformations to show that the per-group fold keeps
 // the lowered body division-free, while a global `delinearize_index` over a
 // dynamic shape would scalarize to runtime-divisor `arith.divsi`/`remsi`.
@@ -644,6 +646,55 @@ func.func @pure_transpose_skipped_under_dispatch_reshape(
 // RESHAPE-SCOPE-LABEL: @pure_transpose_skipped_under_dispatch_reshape
 //       RESHAPE-SCOPE:   linalg.transpose
 //   RESHAPE-SCOPE-NOT:   iree_linalg_ext.map_store
+
+// -----
+
+// A `collapse_shape` -> padded `pack` chain, as produced by encoding
+// materialization of a `set_encoding` on a reshaped result. The padding values
+// are written by separate loops. When the dispatch is distributed to
+// workgroups, these loops are workgroup distributed `scf.forall` ops. When it
+// is not (`distribute-to-workgroups=false`, e.g. with
+// `--iree-llvmcpu-disable-distribution`), they must not carry a workgroup
+// mapping, since the rest of the dispatch is not inside a workgroup forall.
+func.func @collapse_and_padded_pack(%source : tensor<3x3x100x64xf32>,
+                                    %result : memref<57x64x16x1xf32>) {
+  %cst = arith.constant 0.0 : f32
+  %collapse = tensor.collapse_shape %source [[0, 1, 2], [3]]
+      : tensor<3x3x100x64xf32> into tensor<900x64xf32>
+  %dest = tensor.empty() : tensor<57x64x16x1xf32>
+  %pack = linalg.pack %collapse padding_value(%cst : f32)
+      outer_dims_perm = [0, 1] inner_dims_pos = [0, 1] inner_tiles = [16, 1]
+      into %dest : tensor<900x64xf32> -> tensor<57x64x16x1xf32>
+  iree_codegen.store_to_buffer %pack, %result
+      : tensor<57x64x16x1xf32> into memref<57x64x16x1xf32>
+  return
+}
+// RESHAPE-SCOPE-LABEL: @collapse_and_padded_pack
+//   RESHAPE-SCOPE-NOT:   tensor.collapse_shape
+//   RESHAPE-SCOPE-NOT:   linalg.pack
+//       RESHAPE-SCOPE:   iree_linalg_ext.map_store
+//       RESHAPE-SCOPE:   iree_codegen.store_to_buffer
+//       RESHAPE-SCOPE:   scf.forall ({{.+}}) = (900, 0) to (912, 64) step (1, 64) {
+//       RESHAPE-SCOPE:     memref.store
+//       RESHAPE-SCOPE:   } {mapping = [#iree_codegen.workgroup_mapping<y>, #iree_codegen.workgroup_mapping<x>]}
+//   RESHAPE-SCOPE-NOT:   scf.forall
+//       RESHAPE-SCOPE:   return
+//
+// RESHAPE-NO-DIST-LABEL: @collapse_and_padded_pack
+//   RESHAPE-NO-DIST-NOT:   tensor.collapse_shape
+//   RESHAPE-NO-DIST-NOT:   linalg.pack
+//       RESHAPE-NO-DIST:   iree_linalg_ext.map_store
+//       RESHAPE-NO-DIST:   iree_codegen.store_to_buffer
+// The unmapped forall is not kept for distribution, so canonicalization drops
+// its unit trip count dimension.
+//       RESHAPE-NO-DIST:   scf.forall ({{.+}}) = (900) to (912) step (1) {
+//       RESHAPE-NO-DIST:     memref.store
+//  RESHAPE-NO-DIST-NEXT:       }
+//  RESHAPE-NO-DIST-NEXT:     }
+//  RESHAPE-NO-DIST-NEXT:   }{{$}}
+//   RESHAPE-NO-DIST-NOT:   mapping
+//   RESHAPE-NO-DIST-NOT:   scf.forall
+//       RESHAPE-NO-DIST:   return
 
 // -----
 

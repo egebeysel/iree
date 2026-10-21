@@ -22,7 +22,8 @@ struct DistributionConfig {
   /// tiles are expected to be 1.
   SmallVector<int64_t> tileSizes;
   /// Distribution mapping for the distributed loops (e.g., the `mapping`
-  /// attribute of an scf.forall op).
+  /// attribute of an scf.forall op). An empty mapping means the loops are not
+  /// distributed, and the scf.forall op is created without a mapping.
   SmallVector<Attribute> mapping;
 };
 

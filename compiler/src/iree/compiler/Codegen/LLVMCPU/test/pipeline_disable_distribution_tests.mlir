@@ -43,3 +43,37 @@ func.func @matmul_static() attributes {
 }
 // CHECK-LABEL: func.func @matmul_static
 // CHECK-NOT:     scf.forall
+
+// -----
+
+// A `collapse_shape` -> padded `pack` chain (e.g., from materializing a
+// `set_encoding` on a reshaped result) is folded into a `map_store` before
+// the lowering strategy is selected, and the padding values are written by
+// separate loops. With distribution disabled, those loops must not be
+// workgroup distributed: the map_store itself is not inside a workgroup
+// forall, so a workgroup distributed pad loop would fail the workgroup
+// distribution verification.
+
+#executable_target_embedded_elf_riscv_64_ = #hal.executable.target<"llvm-cpu", "embedded-elf-riscv_64", {cpu_features = "+m,+a,+f,+d,+c,+v,+zvl256b", native_vector_size = 32 : i64, target_triple = "riscv64-unknown-unknown-eabi-elf"}>
+func.func @collapse_and_padded_pack_without_distribution() attributes {hal.executable.target = #executable_target_embedded_elf_riscv_64_} {
+  %cst = arith.constant 0.000000e+00 : f32
+  %c0 = arith.constant 0 : index
+  %0 = hal.interface.binding.subspan layout(<bindings = [#hal.pipeline.binding<storage_buffer, "ReadOnly|Indirect">, #hal.pipeline.binding<storage_buffer, Indirect>], flags = Indirect>) binding(0) alignment(64) offset(%c0) flags("ReadOnly|Indirect") : !iree_tensor_ext.dispatch.tensor<readonly:tensor<3x3x100x64xf32>>
+  %1 = hal.interface.binding.subspan layout(<bindings = [#hal.pipeline.binding<storage_buffer, "ReadOnly|Indirect">, #hal.pipeline.binding<storage_buffer, Indirect>], flags = Indirect>) binding(1) alignment(64) offset(%c0) flags(Indirect) : !iree_tensor_ext.dispatch.tensor<writeonly:tensor<57x64x16x1xf32>>
+  %2 = iree_tensor_ext.dispatch.tensor.load %0, offsets = [0, 0, 0, 0], sizes = [3, 3, 100, 64], strides = [1, 1, 1, 1] : !iree_tensor_ext.dispatch.tensor<readonly:tensor<3x3x100x64xf32>> -> tensor<3x3x100x64xf32>
+  %3 = tensor.empty() : tensor<3x3x100x64xf32>
+  %4 = linalg.generic {indexing_maps = [affine_map<(d0, d1, d2, d3) -> (d0, d1, d2, d3)>, affine_map<(d0, d1, d2, d3) -> (d0, d1, d2, d3)>], iterator_types = ["parallel", "parallel", "parallel", "parallel"]} ins(%2 : tensor<3x3x100x64xf32>) outs(%3 : tensor<3x3x100x64xf32>) {
+  ^bb0(%in: f32, %out: f32):
+    %7 = arith.mulf %in, %in : f32
+    linalg.yield %7 : f32
+  } -> tensor<3x3x100x64xf32>
+  %collapsed = tensor.collapse_shape %4 [[0, 1, 2], [3]] : tensor<3x3x100x64xf32> into tensor<900x64xf32>
+  %5 = tensor.empty() : tensor<57x64x16x1xf32>
+  %pack = linalg.pack %collapsed padding_value(%cst : f32) outer_dims_perm = [0, 1] inner_dims_pos = [0, 1] inner_tiles = [16, 1] into %5 : tensor<900x64xf32> -> tensor<57x64x16x1xf32>
+  iree_tensor_ext.dispatch.tensor.store %pack, %1, offsets = [0, 0, 0, 0], sizes = [57, 64, 16, 1], strides = [1, 1, 1, 1] : tensor<57x64x16x1xf32> -> !iree_tensor_ext.dispatch.tensor<writeonly:tensor<57x64x16x1xf32>>
+  return
+}
+// CHECK-LABEL: func.func @collapse_and_padded_pack_without_distribution
+// CHECK-NOT:     workgroup_mapping
+// CHECK-NOT:     scf.forall
+// CHECK:         return

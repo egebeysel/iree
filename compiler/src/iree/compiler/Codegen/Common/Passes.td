@@ -188,7 +188,9 @@ def CombineResultLayoutTransformationPass :
     etc.) into a single iree_linalg_ext.map_store operation. For tensor.pad
     ops, the writing of pad values is distributed to workgroups, and then the
     padding values are written directly to the output buffer of the
-    store_to_buffer op.
+    store_to_buffer op. If `distribute-to-workgroups` is false (i.e., the
+    dispatch will not be distributed to workgroups), the pad values are
+    written by scf.forall ops without a workgroup mapping instead.
   }];
   let options = [
     Option<"scope", "scope",
@@ -203,7 +205,12 @@ def CombineResultLayoutTransformationPass :
                "Like dispatch, but only for chains containing an expand/collapse_shape"),
              clEnumValN(IREE::Codegen::RelayoutCombinationScope::Workgroup, "workgroup",
                "Combine relayout ops starting from workgroup forall terminator ops"))
-           }]>
+           }]>,
+    Option<"distributeToWorkgroups", "distribute-to-workgroups", "bool",
+           /*default=*/"true",
+           "Whether the dispatch is distributed to workgroups. If false, the "
+           "loops writing the padding values of folded tensor.pad ops are "
+           "scf.forall ops without a workgroup mapping.">
   ];
   let dependentDialects = [
     "iree_compiler::IREE::LinalgExt::IREELinalgExtDialect",

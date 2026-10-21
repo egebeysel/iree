@@ -664,11 +664,17 @@ void buildLLVMCPUCodegenConfigurationPassPipelineImpl(
       // `map_store` is a scatter with no intermediate buffer. The
       // `DispatchReshape` scope restricts this to reshape-containing chains so
       // plain `pack` encodings (which tile fine) are left untouched.
+      // This runs before the lowering strategy is selected, so there are no
+      // lowering configs to infer workgroup distribution from yet. Use the
+      // same option that gates `TileAndDistributeToWorkgroupsUsingForallOp`
+      // in `addTileAndDistributePasses`: if distribution is disabled, the pad
+      // value loops must not be workgroup distributed either.
       .addPass(createBufferizeDispatchTensorLoadStorePass)
-      .addPass([] {
+      .addPass([disableDistribution = cpuOpts.disableDistribution] {
         CombineResultLayoutTransformationPassOptions options;
         options.scope =
             IREE::Codegen::RelayoutCombinationScope::DispatchReshape;
+        options.distributeToWorkgroups = !disableDistribution;
         return createCombineResultLayoutTransformationPass(options);
       });
   modulePassManager.addPass(createLLVMCPUSelectLoweringStrategyPass());
